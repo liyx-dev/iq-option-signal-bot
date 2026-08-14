@@ -15,3 +15,4 @@ database_id = "0d926bab-27da-4f0c-b938-cf4547d30e3c"
 # Scheduled Cron: Trigger every 5 minutes to generate new timed Blitz signals
 [triggers]
 crons = ["*/5 * * * *"]
+
