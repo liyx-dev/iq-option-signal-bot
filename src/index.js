@@ -17,7 +17,6 @@ export default {
         const result = await processBlitzSignal(env);
         return Response.json(result);
       } catch (err) {
-        // Return exact error message to browser instead of crashing into a broken page
         return new Response(
           JSON.stringify({
             error: "Execution Failed",
@@ -45,13 +44,29 @@ export default {
 };
 
 async function processBlitzSignal(env) {
-  // 1. Fetch live market price
-  const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true");
-  if (!res.ok) throw new Error("Failed to fetch market price from API");
-  
-  const data = await res.json();
-  const currentPrice = data.bitcoin.usd;
-  const change24h = data.bitcoin.usd_24h_change ? data.bitcoin.usd_24h_change.toFixed(2) : "0.00";
+  let currentPrice = 0;
+  let change24h = 0;
+
+  // 1. Fetch live market price (Try Binance API first for high-speed response)
+  try {
+    const binanceRes = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT");
+    if (binanceRes.ok) {
+      const bData = await binanceRes.json();
+      currentPrice = parseFloat(bData.lastPrice);
+      change24h = parseFloat(bData.priceChangePercent);
+    } else {
+      throw new Error("Binance API non-200 response");
+    }
+  } catch (err) {
+    // Fallback to CoinGecko with User-Agent header
+    const cgRes = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true", {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+    });
+    if (!cgRes.ok) throw new Error("Failed to fetch market price from both Binance and CoinGecko APIs");
+    const data = await cgRes.json();
+    currentPrice = data.bitcoin.usd;
+    change24h = data.bitcoin.usd_24h_change || 0;
+  }
 
   // 2. Compute Entry Time for Next 1-minute candle
   const now = new Date();
@@ -61,12 +76,12 @@ async function processBlitzSignal(env) {
   // 3. Fallback directional decision logic
   let direction = change24h >= 0 ? "CALL" : "PUT";
   let confidence = 0.80;
-  let reasoning = `Momentum trend based on 24h market direction (${change24h}%).`;
+  let reasoning = `24h momentum trend bias (${change24h.toFixed(2)}%).`;
 
-  // 4. Try Cloudflare Workers AI
+  // 4. Run Cloudflare Workers AI Analysis
   if (env.AI) {
     try {
-      const prompt = `Analyze 1-minute candle momentum for BTC/USD at price $${currentPrice}. Return JSON strictly with keys "direction" ("CALL" or "PUT"), "confidence" (0.7 to 0.95), "reasoning" (1 short sentence).`;
+      const prompt = `Analyze 1-minute candle momentum for BTC/USD at $${currentPrice}. Output JSON strictly with keys "direction" ("CALL" or "PUT"), "confidence" (0.7 to 0.95), "reasoning" (1 short sentence).`;
       const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
         prompt: prompt
       });
