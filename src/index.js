@@ -47,7 +47,7 @@ async function processBlitzSignal(env) {
   let currentPrice = 0;
   let change24h = 0;
 
-  // 1. Fetch live market price (Try Binance API first for high-speed response)
+  // 1. Fetch live market price
   try {
     const binanceRes = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT");
     if (binanceRes.ok) {
@@ -58,20 +58,25 @@ async function processBlitzSignal(env) {
       throw new Error("Binance API non-200 response");
     }
   } catch (err) {
-    // Fallback to CoinGecko with User-Agent header
     const cgRes = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true", {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     });
-    if (!cgRes.ok) throw new Error("Failed to fetch market price from both Binance and CoinGecko APIs");
+    if (!cgRes.ok) throw new Error("Failed to fetch market price from APIs");
     const data = await cgRes.json();
     currentPrice = data.bitcoin.usd;
     change24h = data.bitcoin.usd_24h_change || 0;
   }
 
-  // 2. Compute Entry Time for Next 1-minute candle
+  // 2. Compute Entry Time for Next 1-minute candle in WAT (Nigeria Time)
   const now = new Date();
   now.setMinutes(now.getMinutes() + 1);
-  const entryTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+  const entryTime = now.toLocaleTimeString('en-US', {
+    timeZone: 'Africa/Lagos',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
 
   // 3. Fallback directional decision logic
   let direction = change24h >= 0 ? "CALL" : "PUT";
@@ -102,9 +107,9 @@ async function processBlitzSignal(env) {
     const message = `
 🔔 *IQ OPTION BLITZ SIGNAL!*
 
-🎫 *Asset:* 🪙 Bitcoin / OTC
+🎫 *Asset:* 🪙 BTC/USD (Blitz / Crypto)
 ⏳ *Expiration:* 1 Minute
-➡️ *Entry Time:* ${entryTime}
+➡️ *Entry Time:* ${entryTime} (WAT)
 📈 *Direction:* ${directionEmoji}
 🎯 *Confidence:* ${(confidence * 100).toFixed(0)}%
 
@@ -138,7 +143,12 @@ async function processBlitzSignal(env) {
 
 function getOffsetTime(baseDate, addMinutes) {
   const d = new Date(baseDate.getTime() + addMinutes * 60000);
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  return d.toLocaleTimeString('en-US', {
+    timeZone: 'Africa/Lagos',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
 }
 
 async function sendTelegramMessage(env, text) {
