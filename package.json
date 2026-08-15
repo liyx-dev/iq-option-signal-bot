@@ -1,0 +1,8 @@
+{
+  "name":"iq-option-signal-bot",
+  "private":true,
+  "type":"module",
+  "scripts":{
+    "check":"node --check src/index.js && node --check src/analysis.js && node --check src/ai.js"
+  }
+}
