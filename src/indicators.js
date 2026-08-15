@@ -1,108 +1,133 @@
-export function sma(values, period) {
-  if (values.length < period) return null;
-  const slice = values.slice(-period);
-  return slice.reduce((a, b) => a + b, 0) / period;
-}
+// Pure local indicator engine. No provider indicator endpoints are required.
 
 export function ema(values, period) {
-  if (values.length < period) return null;
-  const k = 2 / (period + 1);
-  let e = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < values.length; i++) e = values[i] * k + e * (1 - k);
-  return e;
-}
-
-export function rsi(closes, period = 14) {
-  if (closes.length < period + 1) return null;
-  let gain = 0, loss = 0;
-  for (let i = 1; i <= period; i++) {
-    const d = closes[i] - closes[i - 1];
-    if (d >= 0) gain += d; else loss -= d;
+  if (!values.length) return [];
+  const k = 2/(period+1);
+  const out = new Array(values.length).fill(null);
+  let prev = values[0];
+  out[0] = prev;
+  for (let i=1;i<values.length;i++) {
+    prev = values[i]*k + prev*(1-k);
+    out[i] = prev;
   }
-  let avgGain = gain / period, avgLoss = loss / period;
-  for (let i = period + 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    const g = Math.max(d, 0), l = Math.max(-d, 0);
-    avgGain = (avgGain * (period - 1) + g) / period;
-    avgLoss = (avgLoss * (period - 1) + l) / period;
+  return out;
+}
+
+export function rsi(values, period=14) {
+  const out = new Array(values.length).fill(null);
+  if (values.length <= period) return out;
+  let gain=0, loss=0;
+  for (let i=1;i<=period;i++) {
+    const d=values[i]-values[i-1];
+    gain += Math.max(d,0);
+    loss += Math.max(-d,0);
   }
-  if (avgLoss === 0) return 100;
-  return 100 - (100 / (1 + avgGain / avgLoss));
-}
-
-export function atr(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const trs = [];
-  for (let i = 1; i < candles.length; i++) {
-    const c = candles[i], p = candles[i - 1];
-    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
+  let avgGain=gain/period, avgLoss=loss/period;
+  out[period] = avgLoss===0 ? 100 : 100-(100/(1+avgGain/avgLoss));
+  for (let i=period+1;i<values.length;i++) {
+    const d=values[i]-values[i-1];
+    avgGain=(avgGain*(period-1)+Math.max(d,0))/period;
+    avgLoss=(avgLoss*(period-1)+Math.max(-d,0))/period;
+    out[i]=avgLoss===0 ? 100 : 100-(100/(1+avgGain/avgLoss));
   }
-  return sma(trs, period);
+  return out;
 }
 
-export function macd(closes, fast = 12, slow = 26, signal = 9) {
-  if (closes.length < slow + signal) return null;
-  const kf = 2 / (fast + 1), ks = 2 / (slow + 1), kg = 2 / (signal + 1);
-  let ef = closes.slice(0, fast).reduce((a,b)=>a+b,0)/fast;
-  let es = closes.slice(0, slow).reduce((a,b)=>a+b,0)/slow;
-  const macdLine = [];
-  for (let i = fast; i < slow; i++) ef = closes[i]*kf + ef*(1-kf);
-  for (let i = slow; i < closes.length; i++) {
-    ef = closes[i]*kf + ef*(1-kf);
-    es = closes[i]*ks + es*(1-ks);
-    macdLine.push(ef - es);
+export function atr(candles, period=14) {
+  const tr = candles.map((c,i)=>{
+    if (i===0) return c.high-c.low;
+    return Math.max(c.high-c.low, Math.abs(c.high-candles[i-1].close), Math.abs(c.low-candles[i-1].close));
+  });
+  const out=new Array(candles.length).fill(null);
+  if (tr.length<=period) return out;
+  let a=tr.slice(1,period+1).reduce((s,v)=>s+v,0)/period;
+  out[period]=a;
+  for(let i=period+1;i<tr.length;i++){ a=(a*(period-1)+tr[i])/period; out[i]=a; }
+  return out;
+}
+
+export function macd(values, fast=12, slow=26, signal=9) {
+  const ef=ema(values,fast), es=ema(values,slow);
+  const line=values.map((_,i)=>ef[i]-es[i]);
+  const sig=ema(line.slice(slow),signal);
+  const full=new Array(values.length).fill(null);
+  const hist=new Array(values.length).fill(null);
+  for(let i=slow;i<values.length;i++){
+    full[i]=line[i];
+    const s=sig[i-slow];
+    hist[i]=s==null?null:line[i]-s;
   }
-  if (macdLine.length < signal) return null;
-  let sig = macdLine.slice(0, signal).reduce((a,b)=>a+b,0)/signal;
-  for (let i = signal; i < macdLine.length; i++) sig = macdLine[i]*kg + sig*(1-kg);
-  return { line: macdLine.at(-1), signal: sig, histogram: macdLine.at(-1) - sig };
+  return { line:full, signal:full.map((_,i)=>i<slow?null:sig[i-slow]??null), histogram:hist };
 }
 
-export function bollinger(closes, period = 20, mult = 2) {
-  if (closes.length < period) return null;
-  const mean = sma(closes, period);
-  const slice = closes.slice(-period);
-  const variance = slice.reduce((s, x) => s + (x - mean) ** 2, 0) / period;
-  const sd = Math.sqrt(variance);
-  return { middle: mean, upper: mean + mult * sd, lower: mean - mult * sd, width: (2 * mult * sd) / mean };
-}
-
-export function roc(closes, period = 5) {
-  if (closes.length <= period) return null;
-  return ((closes.at(-1) / closes.at(-1-period)) - 1) * 100;
-}
-
-export function adx(candles, period = 14) {
-  if (candles.length < period * 2 + 1) return null;
-  const trs = [], plus = [], minus = [];
-  for (let i = 1; i < candles.length; i++) {
-    const c = candles[i], p = candles[i-1];
-    trs.push(Math.max(c.high-c.low, Math.abs(c.high-p.close), Math.abs(c.low-p.close)));
-    const up = c.high-p.high, down = p.low-c.low;
-    plus.push(up > down && up > 0 ? up : 0);
-    minus.push(down > up && down > 0 ? down : 0);
+export function adx(candles, period=14) {
+  const n=candles.length, out=new Array(n).fill(null), plus=new Array(n).fill(null), minus=new Array(n).fill(null);
+  if(n<=period*2) return {adx:out,plusDI:plus,minusDI:minus};
+  const tr=[], pDM=[], mDM=[];
+  for(let i=1;i<n;i++){
+    const up=candles[i].high-candles[i-1].high;
+    const down=candles[i-1].low-candles[i].low;
+    pDM.push(up>down && up>0?up:0);
+    mDM.push(down>up && down>0?down:0);
+    tr.push(Math.max(candles[i].high-candles[i].low,Math.abs(candles[i].high-candles[i-1].close),Math.abs(candles[i].low-candles[i-1].close)));
   }
-  const dx = [];
-  for (let i = period; i <= trs.length; i++) {
-    const tr = trs.slice(i-period,i).reduce((a,b)=>a+b,0);
-    if (!tr) continue;
-    const p = plus.slice(i-period,i).reduce((a,b)=>a+b,0) / tr * 100;
-    const m = minus.slice(i-period,i).reduce((a,b)=>a+b,0) / tr * 100;
-    dx.push((Math.abs(p-m) / Math.max(p+m, 1e-9)) * 100);
+  let atr14=tr.slice(0,period).reduce((s,v)=>s+v,0);
+  let p14=pDM.slice(0,period).reduce((s,v)=>s+v,0);
+  let m14=mDM.slice(0,period).reduce((s,v)=>s+v,0);
+  const dx=new Array(n).fill(null);
+  for(let i=period;i<tr.length;i++){
+    if(i>period){ atr14=atr14-atr14/period+tr[i]; p14=p14-p14/period+pDM[i]; m14=m14-m14/period+mDM[i]; }
+    const p=100*(p14/Math.max(atr14,1e-12));
+    const m=100*(m14/Math.max(atr14,1e-12));
+    plus[i+1]=p; minus[i+1]=m;
+    dx[i+1]=(100*Math.abs(p-m)/Math.max(p+m,1e-12));
   }
-  return dx.length >= period ? sma(dx, period) : null;
+  const first=dx.slice(period+1,period+1+period).filter(Number.isFinite);
+  if(first.length<period) return {adx:out,plusDI:plus,minusDI:minus};
+  let a=first.reduce((s,v)=>s+v,0)/first.length;
+  out[period*2]=a;
+  for(let i=period*2+1;i<n;i++){ if(Number.isFinite(dx[i])) a=(a*(period-1)+dx[i])/period; out[i]=a; }
+  return {adx:out,plusDI:plus,minusDI:minus};
 }
 
-export function candleStats(c) {
-  const range = Math.max(c.high - c.low, Number.EPSILON);
-  const body = Math.abs(c.close - c.open);
+export function bollinger(values, period=20, mult=2) {
+  const mid=new Array(values.length).fill(null), upper=new Array(values.length).fill(null), lower=new Array(values.length).fill(null);
+  for(let i=period-1;i<values.length;i++){
+    const w=values.slice(i-period+1,i+1);
+    const m=w.reduce((s,v)=>s+v,0)/period;
+    const sd=Math.sqrt(w.reduce((s,v)=>s+(v-m)**2,0)/period);
+    mid[i]=m; upper[i]=m+mult*sd; lower[i]=m-mult*sd;
+  }
+  return {mid,upper,lower};
+}
+
+export function resample(candles, minutes) {
+  const size=minutes*60;
+  const groups=new Map();
+  for(const c of candles){
+    const t=Math.floor(c.time/size)*size;
+    if(!groups.has(t)) groups.set(t,{time:t,open:c.open,high:c.high,low:c.low,close:c.close,volume:c.volume||0});
+    else {
+      const g=groups.get(t); g.high=Math.max(g.high,c.high); g.low=Math.min(g.low,c.low); g.close=c.close; g.volume+=(c.volume||0);
+    }
+  }
+  return [...groups.values()].sort((a,b)=>a.time-b.time);
+}
+
+export function snapshot(candles) {
+  if(candles.length<40) return null;
+  const close=candles.map(c=>c.close);
+  const e9=ema(close,9), e21=ema(close,21), e50=ema(close,50);
+  const R=rsi(close,14), A=atr(candles,14), M=macd(close), D=adx(candles,14), B=bollinger(close,20,2);
+  const i=close.length-1;
+  const momentum=(close[i]-close[Math.max(0,i-5)]) / Math.max(Math.abs(close[Math.max(0,i-5)]),1e-12);
+  const trend = e9[i]>e21[i] && e21[i]>e50[i] ? "BULLISH" :
+                e9[i]<e21[i] && e21[i]<e50[i] ? "BEARISH" : "RANGE";
   return {
-    range,
-    body,
-    bodyRatio: body / range,
-    bullish: c.close > c.open,
-    bearish: c.close < c.open,
-    upperWick: c.high - Math.max(c.open, c.close),
-    lowerWick: Math.min(c.open, c.close) - c.low
+    close:close[i], ema9:e9[i], ema21:e21[i], ema50:e50[i],
+    rsi:R[i], atr:A[i], macd:M.line[i], macdSignal:M.signal[i], macdHistogram:M.histogram[i],
+    adx:D.adx[i], plusDI:D.plusDI[i], minusDI:D.minusDI[i],
+    bbMid:B.mid[i], bbUpper:B.upper[i], bbLower:B.lower,
+    momentum, trend
   };
 }
