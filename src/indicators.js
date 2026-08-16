@@ -127,7 +127,8 @@ export function snapshot(candles) {
     close:close[i], ema9:e9[i], ema21:e21[i], ema50:e50[i],
     rsi:R[i], atr:A[i], macd:M.line[i], macdSignal:M.signal[i], macdHistogram:M.histogram[i],
     adx:D.adx[i], plusDI:D.plusDI[i], minusDI:D.minusDI[i],
-    bbMid:B.mid[i], bbUpper:B.upper[i], bbLower:B.lower,
+    bbMid:B.mid[i], bbUpper:B.upper[i], bbLower:B.lower[i], // <-- Updated here
     momentum, trend
   };
 }
+
