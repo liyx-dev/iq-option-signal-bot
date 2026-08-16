@@ -114,3 +114,51 @@ External FX data is not identical to IQ Option OTC pricing. The engine therefore
 A future IQ Option read-only connector can be plugged into the provider boundary after its authentication and protocol requirements are independently verified.
 
 No system can guarantee a winning rate or 100% accurate signals. The goal here is to make the data pipeline, filtering, timing, measurement and failure handling much stronger and more honest.
+
+#EDITS:
+Replace the files in this ZIP over the matching src files.
+
+NEW OPTIONAL Worker variables:
+FX_REFRESH_PER_RUN=4
+PROVIDER_RETRIES=2
+CACHE_MAX_AGE_SECONDS=180
+
+Keep your existing:
+TWELVE_DATA_API_KEY
+COINGECKO_API_KEY
+OANDA_API_TOKEN
+OANDA_ACCOUNT_ID
+OANDA_BASE_URL
+DUKASCOPY_BASE_URL
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+ADMIN_SECRET
+ENTRY_LEAD_MINUTES
+MIN_SIGNAL_SCORE
+MIN_DATA_QUALITY
+MAX_SIGNALS_PER_RUN
+CANDLE_COUNT
+REQUEST_TIMEOUT_MS
+
+Do NOT create multiple Twelve Data keys to bypass limits.
+
+Behavior:
+- FX rotates multiple assets per run.
+- Twelve Data is used first within quota.
+- Dukascopy is FX fallback.
+- OANDA is optional third fallback.
+- Binance tries official alternate REST hosts after failure.
+- CoinGecko is secondary crypto reference, not a 1-minute candle hammer.
+- Existing D1 candles are retained when providers fail.
+- Missing candles are never fabricated.
+- Data quality is checked before analysis.
+
+TEST:
+1. /health
+2. /assets
+3. /trigger
+4. /health
+5. /history
+
+Initially DATA_NOT_READY can occur while D1 warms. That is expected.
+
