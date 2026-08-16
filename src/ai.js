@@ -1,72 +1,72 @@
-const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+import { clamp } from "./utils.js";
 
-const schema = {
-  type:"object",
-  properties:{
-    decision:{type:"string",enum:["CALL","PUT","NO_TRADE"]},
-    expiry_minutes:{type:"integer",minimum:1,maximum:5},
-    confidence:{type:"number",minimum:0,maximum:1},
-    quality:{type:"string",enum:["A","B","C","NO_TRADE"]},
-    setup:{type:"string"},
-    reasoning:{type:"string"},
-    invalidation:{type:"string"}
-  },
-  required:["decision","expiry_minutes","confidence","quality","setup","reasoning","invalidation"]
-};
+const MODEL="@cf/meta/llama-3.1-8b-instruct-fast";
 
-export async function askTraderAI(env, asset, analysis) {
-  if(!env.AI) return null;
-  const payload = {
-    asset:asset.display_name,
-    market_type:asset.market_type,
-    proposed_expiry_range:[asset.min_expiry_minutes,asset.max_expiry_minutes],
-    deterministic_analysis:{
-      direction:analysis.direction,
-      score:analysis.score,
-      regime:analysis.regime,
-      setup:analysis.setup,
-      reason:analysis.reason,
-      price:analysis.lastPrice,
-      data_quality:analysis.dataQuality,
-      timeframes:{
-        "1m": compact(analysis.timeframes.m1),
-        "5m": compact(analysis.timeframes.m5),
-        "15m": compact(analysis.timeframes.m15)
+export async function reviewCandidate(env,candidate){
+  if(!env.AI) return {ok:false,reason:"AI binding unavailable"};
+  const s=candidate.snapshots;
+  const payload={
+    asset:candidate.asset.display_name,
+    direction:candidate.direction,
+    deterministicScore:candidate.score,
+    dataQuality:candidate.dataQuality,
+    setup:candidate.setup,
+    agreement:candidate.agreement,
+    regime:candidate.regime,
+    oneMinute:s.s1,
+    fiveMinute:s.s5,
+    fifteenMinute:s.s15,
+    externalConfirmation:candidate.externalConfirmation
+  };
+
+  const prompt=`You are the final risk-control reviewer for a 1-5 minute binary/Blitz signal.
+You are NOT allowed to invent missing market data. The deterministic engine has already computed the features.
+Review the setup like a disciplined short-term trader.
+Reject marginal, contradictory, overextended or low-quality setups.
+Do not chase certainty. A high score is not a guarantee.
+Return ONLY JSON matching the supplied schema.
+
+MARKET SNAPSHOT:
+${JSON.stringify(payload)}`;
+
+  try{
+    const response=await env.AI.run(MODEL,{
+      messages:[
+        {role:"system",content:"You are a conservative quantitative trading reviewer. Prefer NO_TRADE when evidence conflicts."},
+        {role:"user",content:prompt}
+      ],
+      temperature:0.1,
+      max_tokens:220,
+      response_format:{
+        type:"json_schema",
+        json_schema:{
+          name:"signal_review",
+          schema:{
+            type:"object",
+            properties:{
+              decision:{type:"string",enum:["APPROVE","REJECT","WAIT"]},
+              direction:{type:"string",enum:["CALL","PUT"]},
+              confidence:{type:"number",minimum:0,maximum:1},
+              adjustment:{type:"number",minimum:-10,maximum:10},
+              reason:{type:"string"}
+            },
+            required:["decision","direction","confidence","adjustment","reason"]
+          }
+        }
       }
-    }
-  };
-
-  const messages=[
-    {role:"system",content:
-      `You are the senior short-term market analyst in a binary/Blitz signal engine.
-Use ONLY the supplied market data. Never invent candles, prices, indicators or certainty.
-You may reject the setup. Prefer NO_TRADE over weak or conflicting evidence.
-The external instrument is labeled OTC, so do not claim that proxy data is identical to the broker feed.
-Choose an expiry only from the asset's allowed range.
-Return strict JSON matching the supplied schema.`
-    },
-    {role:"user",content:JSON.stringify(payload)}
-  ];
-
-  const r=await env.AI.run(MODEL,{
-    messages,
-    response_format:{type:"json_schema",json_schema:schema}
-  });
-
-  const out=r?.response;
-  if(!out) return null;
-  const parsed=typeof out==="string" ? JSON.parse(out) : out;
-  if(!["CALL","PUT","NO_TRADE"].includes(parsed.decision)) return null;
-  if(parsed.decision!=="NO_TRADE" && ![1,2,3,4,5].includes(Number(parsed.expiry_minutes))) return null;
-  return parsed;
+    });
+    const text=response?.response || response?.result?.response;
+    if(!text) return {ok:false,reason:"AI returned no response"};
+    const parsed=typeof text==="string"?JSON.parse(text):text;
+    return {
+      ok:true,
+      decision:parsed.decision,
+      direction:parsed.direction,
+      confidence:clamp(Number(parsed.confidence),0,1),
+      adjustment:clamp(Number(parsed.adjustment),-10,10),
+      reason:String(parsed.reason||"")
+    };
+  }catch(e){
+    return {ok:false,reason:`AI review failed: ${e.message}`};
+  }
 }
-
-function compact(x){
-  return {
-    bias:x.bias, trend:x.trend, ema9:x.ema9, ema21:x.ema21, ema50:x.ema50,
-    rsi:x.rsi, atr:x.atr, macd:x.macd, bollinger:x.bollinger, roc:x.roc,
-    adx:x.adx, support:x.support, resistance:x.resistance,
-    directionalStrength:x.directionalStrength
-  };
-}
-
