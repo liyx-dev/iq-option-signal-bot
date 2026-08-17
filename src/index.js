@@ -4,7 +4,8 @@ import { json, formatWAT } from "./utils.js";
 import {
   getAssets,
   loadCandles,
-  providerHealth
+  providerHealth,
+  cleanupStorage
 } from "./db.js";
 
 import { TwelveDataProvider } from "./providers/twelvedata.js";
@@ -251,7 +252,15 @@ function authorized(request, env) {
 async function runEngine(env) {
 
   const cfg = getConfig(env);
-
+  // Keep D1 lean and fast.
+try {
+  await cleanupStorage(env.DB, cfg);
+} catch (e) {
+  console.log(
+    "Storage cleanup failed:",
+    e.message
+  );
+}
   const assets = await getAssets(env.DB);
 
   if (!assets.length) {
