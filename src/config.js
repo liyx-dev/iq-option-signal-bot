@@ -19,6 +19,12 @@ export const DEFAULTS = {
 
   fxRefreshPerRun: 4,
 
+  // FIX (Aug 2026): crypto used to refresh EVERY enabled crypto pair
+  // EVERY run (once a minute), which was firing 6 rapid-fire requests
+  // at KuCoin the moment CryptoCompare/Bybit failed, tripping its
+  // rate limiter (HTTP 429). Capped the same way FX already was.
+  cryptoRefreshPerRun: 3,
+
   providerRetries: 2,
 
   cacheMaxAgeSeconds: 180,
@@ -39,105 +45,39 @@ export function getConfig(env) {
   return {
     ...DEFAULTS,
 
-    entryLeadMinutes:
-      clampInt(
-        env.ENTRY_LEAD_MINUTES,
-        2,
-        1,
-        3
-      ),
+    entryLeadMinutes: clampInt(env.ENTRY_LEAD_MINUTES, 2, 1, 3),
 
-    minScore:
-      clampNum(
-        env.MIN_SIGNAL_SCORE,
-        80,
-        60,
-        95
-      ),
+    minScore: clampNum(env.MIN_SIGNAL_SCORE, 80, 60, 95),
 
-    minDataQuality:
-      clampNum(
-        env.MIN_DATA_QUALITY,
-        0.85,
-        0.5,
-        0.99
-      ),
+    minDataQuality: clampNum(env.MIN_DATA_QUALITY, 0.85, 0.5, 0.99),
 
-    maxSignalsPerRun:
-      clampInt(
-        env.MAX_SIGNALS_PER_RUN,
-        2,
-        1,
-        5
-      ),
+    maxSignalsPerRun: clampInt(env.MAX_SIGNALS_PER_RUN, 2, 1, 5),
 
-    candleCount:
-      clampInt(
-        env.CANDLE_COUNT,
-        360,
-        300,
-        500
-      ),
+    candleCount: clampInt(env.CANDLE_COUNT, 360, 300, 500),
 
-    requestTimeoutMs:
-      clampInt(
-        env.REQUEST_TIMEOUT_MS,
-        8500,
-        3000,
-        15000
-      ),
+    requestTimeoutMs: clampInt(env.REQUEST_TIMEOUT_MS, 8500, 3000, 15000),
 
-    fxRefreshPerRun:
-      clampInt(
-        env.FX_REFRESH_PER_RUN,
-        4,
-        1,
-        8
-      ),
+    fxRefreshPerRun: clampInt(env.FX_REFRESH_PER_RUN, 4, 1, 8),
 
-    providerRetries:
-      clampInt(
-        env.PROVIDER_RETRIES,
-        2,
-        0,
-        4
-      ),
+    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 3, 1, 6),
 
-    cacheMaxAgeSeconds:
-      clampInt(
-        env.CACHE_MAX_AGE_SECONDS,
-        180,
-        60,
-        900
-      ),
+    providerRetries: clampInt(env.PROVIDER_RETRIES, 2, 0, 4),
 
-    minMTFAgreement:
-      clampNum(
-        env.MIN_MTF_AGREEMENT,
-        0.80,
-        0.67,
-        1
-      )
+    cacheMaxAgeSeconds: clampInt(env.CACHE_MAX_AGE_SECONDS, 180, 60, 900),
+
+    minMTFAgreement: clampNum(env.MIN_MTF_AGREEMENT, 0.80, 0.67, 1)
   };
 }
 
 
 function clampNum(v, f, min, max) {
-
   const n = Number(v);
-
-  return Number.isFinite(n)
-    ? Math.min(max, Math.max(min, n))
-    : f;
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : f;
 }
 
 
 function clampInt(v, f, min, max) {
-
   const n = Math.floor(Number(v));
-
-  return Number.isFinite(n)
-    ? Math.min(max, Math.max(min, n))
-    : f;
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : f;
 }
 
