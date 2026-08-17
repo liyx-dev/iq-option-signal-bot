@@ -230,20 +230,15 @@ export default {
 /* ============================================================
    AUTH
 ============================================================ */
-
 function authorized(request, env) {
-
   if (!env.ADMIN_SECRET) {
     return false;
   }
-
-  return (
-    request.headers.get("Authorization") ===
-    `Bearer ${env.ADMIN_SECRET}`
-  );
-
+  const header = request.headers.get("Authorization") === `Bearer ${env.ADMIN_SECRET}`;
+  const url = new URL(request.url);
+  const queryKey = url.searchParams.get("key") === env.ADMIN_SECRET;
+  return header || queryKey;
 }
-
 
 /* ============================================================
    MAIN ENGINE
