@@ -3,6 +3,9 @@ main = "src/index.js"
 compatibility_date = "2026-08-15"
 keep_vars = true
 
+[observability]
+enabled = true
+
 [ai]
 binding = "AI"
 
