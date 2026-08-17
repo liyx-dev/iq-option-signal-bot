@@ -20,7 +20,7 @@
 // Healthy assets are refreshed far less often since 1-minute
 // candles a few minutes old are still perfectly usable.
 // ============================================================
-import { saveCandles, loadCandles, providerHealth, getScanCursor, setScanCursor } from "./db.js";
+import { saveCandles, loadCandles, providerHealth } from "./db.js";
 import { assessCandles } from "./data-quality.js";
 import { reserveTwelveData } from "./quota-manager.js";
 
@@ -92,22 +92,59 @@ export async function refreshFX(env, cfg, assets, p) {
   return out;
 }
 
+// Mirrors pickFxRefreshTargets but for crypto: prioritizes whichever
+// pairs have gaps, no data, or stale data, instead of hammering every
+// crypto pair every single minute. This is what fixes the KuCoin
+// HTTP 429s — 6 crypto pairs no longer all fire in the same run.
+async function pickCryptoRefreshTargets(db, cfg, cryptoAssets) {
+  const scored = [];
+
+  for (const asset of cryptoAssets) {
+    const candles = await loadCandles(db, asset.symbol, cfg.candleCount);
+    const dq = assessCandles(candles, Math.floor(Date.now() / 1000), cfg.cacheMaxAgeSeconds);
+
+    let urgency = 0;
+    if (!candles.length) urgency = 1000;
+    else {
+      urgency += (dq.gaps || 0) * 10;
+      urgency += dq.ready ? 0 : 50;
+      urgency += Math.min(50, Math.floor((dq.ageSeconds || 0) / 30));
+    }
+
+    scored.push({ asset, urgency });
+  }
+
+  scored.sort((a, b) => b.urgency - a.urgency);
+  return scored.map(s => s.asset);
+}
+
 export async function refreshCrypto(env, cfg, assets, p) {
+  const crypto = assets.filter(a => a.kind === "CRYPTO");
+  if (!crypto.length) return [];
+
+  // Same gap/staleness-priority approach as FX, and same per-run cap,
+  // so we never fire more than a few crypto requests in one tick.
+  const ranked = await pickCryptoRefreshTargets(env.DB, cfg, crypto);
+  const limit = Math.min(cfg.cryptoRefreshPerRun, ranked.length);
   const out = [];
 
-  for (const asset of assets.filter(a => a.kind === "CRYPTO")) {
-    const symbol = asset.provider_symbol || asset.symbol;
+  for (let n = 0; n < limit; n++) {
+    const asset = ranked[n];
+    const symbol = asset.provider_symbol || asset.symbol; // e.g. "BTCUSDT"
 
-    // Primary: Bybit. Not geo-blocked (unlike Binance, which returns
-    // HTTP 451 from Cloudflare's edge network) and needs no API key.
-    let r = await p.bybit.candles(symbol, cfg.candleCount);
-    await providerHealth(env.DB, "bybit", r.ok, r.latencyMs, r.ok ? null : String(r.error || "ERROR").slice(0, 80));
+    // Primary: CryptoCompare histominute. Purpose-built for OHLCV,
+    // no key required, and separate infrastructure from the exchanges
+    // (Binance/Bybit) that block Cloudflare's IP ranges.
+    const { fsym, tsym } = splitSymbol(symbol);
+    let r = await p.cc.candles(fsym, tsym, cfg.candleCount);
+    await providerHealth(env.DB, "cryptocompare", r.ok, r.latencyMs, r.ok ? null : String(r.error || "ERROR").slice(0, 80));
 
-    // Fallback: KuCoin, also key-free. Symbol format differs (hyphenated),
-    // so we convert e.g. "BTCUSDT" -> "BTC-USDT" here.
+    // Fallback: KuCoin. Symbol format differs (hyphenated), so convert
+    // e.g. "BTCUSDT" -> "BTC-USDT". Only reached when CryptoCompare
+    // fails, and now at most cryptoRefreshPerRun times per minute
+    // instead of once per crypto pair — this is what stops the 429s.
     if (!r.ok) {
-      const kucoinSymbol = toKuCoinSymbol(symbol);
-      r = await p.kucoin.candles(kucoinSymbol, cfg.candleCount);
+      r = await p.kucoin.candles(toKuCoinSymbol(symbol), cfg.candleCount);
       await providerHealth(env.DB, "kucoin", r.ok, r.latencyMs, r.ok ? null : String(r.error || "ERROR").slice(0, 80));
     }
 
@@ -125,6 +162,19 @@ export async function refreshCrypto(env, cfg, assets, p) {
   }
 
   return out;
+}
+
+// "BTCUSDT" -> {fsym:"BTC", tsym:"USDT"}. CryptoCompare wants the two
+// legs separately rather than one concatenated symbol.
+function splitSymbol(binanceStyleSymbol) {
+  const s = String(binanceStyleSymbol || "").toUpperCase();
+  const quotes = ["USDT", "USDC", "BUSD", "USD"];
+  for (const q of quotes) {
+    if (s.endsWith(q) && s.length > q.length) {
+      return { fsym: s.slice(0, -q.length), tsym: q === "USDT" || q === "USDC" || q === "BUSD" ? "USD" : q };
+    }
+  }
+  return { fsym: s, tsym: "USD" };
 }
 
 // "BTCUSDT" -> "BTC-USDT". Handles the common quote currencies used
@@ -145,4 +195,3 @@ export async function getMarketState(db, asset, cfg) {
   const quality = assessCandles(candles, Math.floor(Date.now() / 1000), cfg.cacheMaxAgeSeconds);
   return { candles, quality };
 }
-
