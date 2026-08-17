@@ -1,9 +1,23 @@
 export const DEFAULTS = {
-  entryLeadMinutes: 2, minScore: 76, minDataQuality: 0.78,
-  maxSignalsPerRun: 3, candleCount: 160, maxCandleAgeSeconds: 95,
-  twelveMinuteQuota: 8, twelveDailyQuota: 800, requestTimeoutMs: 8500,
-  fxRefreshPerRun: 4, providerRetries: 2, cacheMaxAgeSeconds: 180
+  entryLeadMinutes: 2,
+  minScore: 76,
+  minDataQuality: 0.78,
+  maxSignalsPerRun: 3,
+
+  candleCount: 320,
+
+  maxCandleAgeSeconds: 95,
+
+  twelveMinuteQuota: 8,
+  twelveDailyQuota: 800,
+
+  requestTimeoutMs: 8500,
+
+  fxRefreshPerRun: 4,
+  providerRetries: 2,
+  cacheMaxAgeSeconds: 180
 };
+
 export function getConfig(env) {
   return {...DEFAULTS,
     entryLeadMinutes: clampInt(env.ENTRY_LEAD_MINUTES,2,1,3),
