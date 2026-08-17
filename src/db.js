@@ -3,22 +3,76 @@ export async function getAssets(db) {
   return results||[];
 }
 
-export async function saveCandles(db,symbol,candles,source,quality) {
-  if(!candles?.length) return;
-  const rows=candles.slice(-180);
-  for(const c of rows){
+export async function saveCandles(
+  db,
+  symbol,
+  candles,
+  source,
+  quality
+) {
+
+  if (!candles?.length) return;
+
+  const rows = candles.slice(-360);
+
+  for (const c of rows) {
+
     await db.prepare(`
       INSERT INTO market_candles
-      (symbol,timeframe_seconds,candle_time,open,high,low,close,volume,source,quality,received_at)
+      (
+        symbol,
+        timeframe_seconds,
+        candle_time,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        source,
+        quality,
+        received_at
+      )
       VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(symbol,timeframe_seconds,candle_time) DO UPDATE SET
-        open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
-        volume=excluded.volume,source=excluded.source,quality=excluded.quality,received_at=excluded.received_at
-    `).bind(symbol,60,c.time,c.open,c.high,c.low,c.close,c.volume||0,source,quality,Date.now()).run();
+
+      ON CONFLICT(
+        symbol,
+        timeframe_seconds,
+        candle_time
+      )
+
+      DO UPDATE SET
+
+        open=excluded.open,
+        high=excluded.high,
+        low=excluded.low,
+        close=excluded.close,
+        volume=excluded.volume,
+        source=excluded.source,
+        quality=excluded.quality,
+        received_at=excluded.received_at
+    `)
+      .bind(
+        symbol,
+        60,
+        c.time,
+        c.open,
+        c.high,
+        c.low,
+        c.close,
+        c.volume || 0,
+        source,
+        quality,
+        Date.now()
+      )
+      .run();
   }
 }
 
-export async function loadCandles(db,symbol,count=180) {
+export async function loadCandles(
+  db,
+  symbol,
+  count = 360
+) {
   const {results}=await db.prepare(`
     SELECT candle_time AS time, open, high, low, close, volume
     FROM market_candles
@@ -74,4 +128,97 @@ export async function setScanCursor(db,cursor) {
   await db.prepare("UPDATE scan_state SET cursor=?,last_scan=?,updated_at=? WHERE id=1")
     .bind(cursor,Date.now(),Date.now()).run();
 }
+export async function cleanupStorage(db, cfg) {
+
+  const now = Date.now();
+
+  const candleCutoff =
+    now -
+    cfg.candleRetentionHours *
+    60 *
+    60 *
+    1000;
+
+  const signalCutoff =
+    now -
+    cfg.signalRetentionDays *
+    24 *
+    60 *
+    60 *
+    1000;
+
+  const outcomeCutoff =
+    now -
+    cfg.outcomeRetentionDays *
+    24 *
+    60 *
+    60 *
+    1000;
+
+  const quotaCutoff =
+    now -
+    cfg.quotaRetentionDays *
+    24 *
+    60 *
+    60 *
+    1000;
+
+  // ------------------------------------------------
+  // MARKET CANDLES
+  // ------------------------------------------------
+
+  await db.prepare(`
+    DELETE FROM market_candles
+    WHERE timeframe_seconds=60
+      AND received_at < ?
+  `)
+    .bind(candleCutoff)
+    .run();
+
+  // ------------------------------------------------
+  // SIGNAL HISTORY
+  // ------------------------------------------------
+
+  await db.prepare(`
+    DELETE FROM signals
+    WHERE timestamp < ?
+  `)
+    .bind(signalCutoff)
+    .run();
+
+  // ------------------------------------------------
+  // OUTCOME HISTORY
+  // ------------------------------------------------
+
+  await db.prepare(`
+    DELETE FROM signal_outcomes
+    WHERE observed_at < ?
+  `)
+    .bind(outcomeCutoff)
+    .run();
+
+  // ------------------------------------------------
+  // QUOTA HISTORY
+  // ------------------------------------------------
+
+  await db.prepare(`
+    DELETE FROM quota_usage
+    WHERE updated_at < ?
+  `)
+    .bind(quotaCutoff)
+    .run();
+
+  return {
+    status: "cleaned",
+    candleRetentionHours:
+      cfg.candleRetentionHours,
+    signalRetentionDays:
+      cfg.signalRetentionDays,
+    outcomeRetentionDays:
+      cfg.outcomeRetentionDays,
+    quotaRetentionDays:
+      cfg.quotaRetentionDays
+  };
+}
+
 
