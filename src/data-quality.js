@@ -4,13 +4,52 @@ export function assessCandles(
   maxAge = 180
 ) {
 
+  const currentMinute =
+    Math.floor(nowSec / 60) * 60;
+
+
+  // Only CLOSED 1-minute candles.
   const clean = (candles || [])
-    .filter(c =>
-      Number.isFinite(Number(c.time)) &&
-      [c.open, c.high, c.low, c.close]
-        .every(Number.isFinite)
-    )
-    .sort((a, b) => a.time - b.time);
+    .filter(c => {
+
+      const time = Number(c.time);
+
+      if (!Number.isFinite(time)) {
+        return false;
+      }
+
+      if (
+        ![
+          c.open,
+          c.high,
+          c.low,
+          c.close
+        ].every(Number.isFinite)
+      ) {
+        return false;
+      }
+
+      // Reject future candles.
+      if (time >= currentMinute) {
+        return false;
+      }
+
+      // Reject candles that are absurdly old.
+      if (
+        nowSec - time >
+        48 * 60 * 60
+      ) {
+        return false;
+      }
+
+      return true;
+
+    })
+    .sort(
+      (a, b) =>
+        Number(a.time) -
+        Number(b.time)
+    );
 
 
   if (!clean.length) {
@@ -22,39 +61,53 @@ export function assessCandles(
       gaps: null,
       continuity: 0,
       freshness: 0,
+      countQuality: 0,
       quality: 0,
-      reason: "NO_CANDLES"
+      reason: "NO_VALID_CANDLES"
     };
-
   }
 
 
   let gaps = 0;
 
-
-  for (let i = 1; i < clean.length; i++) {
+  for (
+    let i = 1;
+    i < clean.length;
+    i++
+  ) {
 
     const d =
       clean[i].time -
       clean[i - 1].time;
 
-    if (d > 75) {
+    if (d !== 60) {
 
-      gaps += Math.max(
-        1,
-        Math.round(d / 60) - 1
-      );
+      if (d > 60) {
 
+        gaps += Math.max(
+          1,
+          Math.round(d / 60) - 1
+        );
+
+      } else {
+
+        // Duplicate/out-of-order interval.
+        gaps++;
+
+      }
     }
-
   }
+
+
+  const latest =
+    clean[clean.length - 1];
 
 
   const age =
     Math.max(
       0,
       nowSec -
-      clean.at(-1).time
+      Number(latest.time)
     );
 
 
@@ -77,36 +130,33 @@ export function assessCandles(
         1,
         1 -
         gaps /
-        Math.max(
-          clean.length - 1,
-          1
-        )
+        Math.max(clean.length - 1, 1)
       )
     );
 
 
-  /*
-   * New target: 320 candles.
-   */
   const countQuality =
     Math.min(
       1,
-      clean.length / 320
+      clean.length / 360
     );
 
 
   const quality =
-    .45 * freshness +
-    .35 * continuity +
-    .20 * countQuality;
+    0.45 * freshness +
+    0.35 * continuity +
+    0.20 * countQuality;
+
+
+  const ready =
+    clean.length >= 300 &&
+    gaps === 0 &&
+    age <= maxAge;
 
 
   return {
 
-    ready:
-      clean.length >= 300 &&
-      age <= maxAge &&
-      gaps === 0,
+    ready,
 
     candles:
       clean.length,
@@ -120,17 +170,18 @@ export function assessCandles(
 
     freshness,
 
+    countQuality,
+
     quality,
 
     reason:
       clean.length < 300
         ? "WARMING_UP"
-        : age > maxAge
-          ? "STALE"
-          : gaps
-            ? "GAPS"
+        : gaps > 0
+          ? "GAPS"
+          : age > maxAge
+            ? "STALE"
             : "READY"
 
   };
-
 }
