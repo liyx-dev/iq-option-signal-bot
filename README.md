@@ -1,164 +1,36 @@
-# LIYOG Blitz AI Signal Engine — Premium Rewrite
+# LIYOG Blitz AI — Fix Package (Aug 2026)
 
-This is a signal-only Cloudflare Worker for IQ Option Blitz/OTC manual execution.
+## What changed and why
+- Binance was returning HTTP 451 (geo-blocked from Cloudflare's network) — replaced with Bybit (primary) + KuCoin (fallback), both key-free and not geo-blocked.
+- Dukascopy's free candle API is retired — replaced with a harmless stub so it can't waste time in the fallback chain.
+- OANDA removed (you can't get Nigerian-eligible credentials) — no longer imported anywhere.
+- Fixed the bug causing 12 of 15 FX pairs to stay stuck "WARMING_UP" forever: the refresh logic now prioritizes whichever assets have gaps or stale data, instead of a blind round-robin.
+- Fixed a Twelve Data quota leak where a failed reservation could silently burn a minute-credit without giving it back.
+- Fixed `/trigger` and `/outcome` auth to also accept `?key=YOUR_ADMIN_SECRET` in the URL, so you can trigger a run straight from your phone's browser address bar.
+- Added support for more crypto pairs (ETH, SOL, XRP, LTC, DOGE) via `add_crypto_pairs.sql` — only enable the ones your IQ Option Blitz asset list actually offers.
 
-## What changed
+## Files to REPLACE in your GitHub repo (same path, overwrite content)
+- `src/index.js`
+- `src/data-orchestrator.js`
+- `src/db.js`
+- `src/quota-manager.js`
+- `src/providers/dukascopy.js`
 
-### 1. Provider-fusion architecture
-- Twelve Data: FX reference/history, quota-managed.
-- Binance: primary BTC/crypto 1-minute candles.
-- CoinGecko: crypto price cross-check, not a 1-minute candle hammer.
-- Dukascopy public market-data service: optional FX 1-minute/current-data fallback/reference.
-- OANDA: optional authenticated FX provider if you later obtain a demo/API token.
-- IQ Option: deliberately isolated behind an adapter boundary. No IQ Option email/password/SSID is accepted by this project.
+## Files to ADD (new paths)
+- `src/providers/bybit.js`
+- `src/providers/kucoin.js`
+- `src/providers/fxref.js`
 
-### 2. Twelve Data protection
-The free plan is 8 API credits/minute and 800/day. The engine:
-- makes at most one Twelve Data symbol request in a scan window;
-- rotates through the FX registry;
-- uses local D1 candles for indicators;
-- calculates 5m and 15m candles locally from 1m data;
-- tracks minute/day quota in D1;
-- does not attempt to rotate keys to evade a provider limit.
+## Files to DELETE from your repo
+- `src/providers/binance.js`
+- `src/providers/oanda.js`
 
-This means the system can keep analyzing cached/fallback data when Twelve Data returns 429.
+## SQL to run once against your D1 database
+- `add_crypto_pairs.sql` — via Cloudflare Dashboard → D1 → trading_db → Console. Edit it first to remove any pair not actually on your IQ Option Blitz asset list.
 
-### 3. Local quantitative engine
-Indicators are calculated inside the Worker:
-- EMA 9/21/50
-- RSI 14
-- MACD
-- ADX / +DI / -DI
-- ATR
-- Bollinger Bands
-- momentum
-- multi-timeframe trend
-- 1m -> 5m -> 15m resampling
-- data freshness/quality checks
-
-### 4. AI reviewer
-Cloudflare Workers AI is only used after deterministic filtering, so the model does not waste inference on every asset.
-
-Current model:
-`@cf/meta/llama-3.1-8b-instruct-fast`
-
-The AI is a conservative reviewer, not a generator of missing market data.
-
-### 5. Timing
-Default:
-- signal lead: 2 minutes
-- expiry: dynamically selected between 1 and 5 minutes
-
-Set `ENTRY_LEAD_MINUTES=3` if you want three minutes of preparation time.
-
-The Worker does not claim to know IQ Option's private server clock. Until an independently verified IQ Option data/time connector is available, the displayed time is WAT converted from Worker UTC time.
-
-## D1 installation
-
-Run the contents of `schema.sql` against the existing `trading_db`.
-
-If you already have the old `signals` table, the migration is additive. Do not delete your old database.
-
-## Secrets / variables
-
-Required for Telegram:
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-
-Required for Twelve Data FX refresh:
-- `TWELVE_DATA_API_KEY`
-
-Optional:
-- `COINGECKO_API_KEY`
-- `OANDA_API_TOKEN`
-- `OANDA_ACCOUNT_ID`
-- `OANDA_BASE_URL` (defaults to practice API)
-- `ADMIN_SECRET`
-
-Recommended:
-- `ENTRY_LEAD_MINUTES=2`
-- `MIN_SIGNAL_SCORE=76`
-- `MIN_DATA_QUALITY=0.78`
-- `MAX_SIGNALS_PER_RUN=3`
-- `CANDLE_COUNT=160`
-
-## GitHub / Cloudflare deployment
-
-Your existing GitHub -> Cloudflare deployment can continue. Replace/add the files in this package, commit, and push.
-
-Then:
-1. Apply `schema.sql` to D1.
-2. Add the secrets/variables in Cloudflare Worker settings.
-3. Deploy.
-4. Open `/health`.
-5. Open `/assets`.
-6. Use `/trigger` with `Authorization: Bearer <ADMIN_SECRET>` if `ADMIN_SECRET` is configured.
-
-## Outcome tracking
-
-POST JSON to `/outcome`:
-
-{
-  "signal_id": 123,
-  "result": "WIN",
-  "observed_price": 1.23456,
-  "notes": "manual result"
-}
-
-This is intentionally manual because the Worker is not connected to an IQ Option trading account.
-
-## Important limitation
-
-External FX data is not identical to IQ Option OTC pricing. The engine therefore labels external data as external and never claims it is the IQ Option OTC feed.
-
-A future IQ Option read-only connector can be plugged into the provider boundary after its authentication and protocol requirements are independently verified.
-
-No system can guarantee a winning rate or 100% accurate signals. The goal here is to make the data pipeline, filtering, timing, measurement and failure handling much stronger and more honest.
-
-#EDITS:
-Replace the files in this ZIP over the matching src files.
-
-NEW OPTIONAL Worker variables:
-FX_REFRESH_PER_RUN=4
-PROVIDER_RETRIES=2
-CACHE_MAX_AGE_SECONDS=180
-
-Keep your existing:
-TWELVE_DATA_API_KEY
-COINGECKO_API_KEY
-OANDA_API_TOKEN
-OANDA_ACCOUNT_ID
-OANDA_BASE_URL
-DUKASCOPY_BASE_URL
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-ADMIN_SECRET
-ENTRY_LEAD_MINUTES
-MIN_SIGNAL_SCORE
-MIN_DATA_QUALITY
-MAX_SIGNALS_PER_RUN
-CANDLE_COUNT
-REQUEST_TIMEOUT_MS
-
-Do NOT create multiple Twelve Data keys to bypass limits.
-
-Behavior:
-- FX rotates multiple assets per run.
-- Twelve Data is used first within quota.
-- Dukascopy is FX fallback.
-- OANDA is optional third fallback.
-- Binance tries official alternate REST hosts after failure.
-- CoinGecko is secondary crypto reference, not a 1-minute candle hammer.
-- Existing D1 candles are retained when providers fail.
-- Missing candles are never fabricated.
-- Data quality is checked before analysis.
-
-TEST:
-1. /health
-2. /assets
-3. /trigger
-4. /health
-5. /history
-
-Initially DATA_NOT_READY can occur while D1 warms. That is expected.
+## After deploying
+1. Wait a few minutes for at least one cron tick to run (cron runs every minute automatically — you don't need to trigger it manually).
+2. Check `https://iq-option-signal-bot.goddayprincess1.workers.dev/health` — you should see `bybit` and `kucoin` instead of `binance`, and `dukascopy` should stop accumulating errors (still shows DOWN, but consecutive_errors won't matter since it's now instant/free to call).
+3. Check `/status` — over the following ~10-15 minutes, watch more FX pairs flip from `WARMING_UP` to `READY` as gaps get healed.
+4. If you still want to manually trigger a run: `https://iq-option-signal-bot.goddayprincess1.workers.dev/trigger?key=YOUR_ADMIN_SECRET`
 
