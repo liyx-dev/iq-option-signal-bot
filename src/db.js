@@ -152,4 +152,3 @@ export async function cleanupStorage(db, cfg) {
     quotaRetentionDays: cfg.quotaRetentionDays
   };
 }
-
