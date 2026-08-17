@@ -1,63 +1,342 @@
-import { fetchJson } from "../utils.js";
+import { fetchJsonRetry } from "../utils.js";
 
 export class DukascopyProvider {
-  constructor(env,config){
-    this.base=env.DUKASCOPY_BASE_URL||"https://freeserv.dukascopy.com/2.0/";
-    this.config=config; this.name="dukascopy"; this.instrumentCache=null;
+  constructor(env, config) {
+    this.base =
+      env.DUKASCOPY_BASE_URL ||
+      "https://freeserv.dukascopy.com/2.0/";
+
+    this.config = config;
+    this.name = "dukascopy";
+    this.instrumentCache = null;
   }
 
-  async instrumentList(){
-    const u=new URL(this.base); u.searchParams.set("path","api/instrumentList");
-    const r=await fetchJson(u.toString(),{},this.config.requestTimeoutMs);
-    if(!r.ok || !Array.isArray(r.body)) return {ok:false,error:`Dukascopy instrument HTTP ${r.status||0}`};
-    const map=new Map();
-    for(const x of r.body){
-      const name=String(x.name||x.nameLong||"").replace(/\s*\/\s*/g,"/").trim();
-      const id=Number(x.id);
-      if(name && Number.isFinite(id)) map.set(name,id);
-    }
-    this.instrumentCache=map;
-    return {ok:true,map,latencyMs:r.latencyMs};
-  }
+  buildUrl(path, params = {}) {
+    const u = new URL(this.base);
 
-  async historical(symbol,count=160){
-    if(!this.instrumentCache){
-      const list=await this.instrumentList();
-      if(!list.ok) return list;
-    }
-    const id=this.instrumentCache.get(symbol);
-    if(!Number.isFinite(id)) return {ok:false,error:`Dukascopy instrument not found: ${symbol}`};
-    const u=new URL(this.base);
-    u.searchParams.set("path","api/historicalPrices");
-    u.searchParams.set("instrument",String(id));
-    u.searchParams.set("timeFrame","1min");
-    u.searchParams.set("count",String(Math.min(count,5000)));
-    u.searchParams.set("offerSide","B");
-    const r=await fetchJson(u.toString(),{},this.config.requestTimeoutMs);
-    if(!r.ok || !Array.isArray(r.body)) return {ok:false,error:`Dukascopy historical HTTP ${r.status||0}`};
-    const candles=r.body.map(x=>{
-      const time=Number(x.time||x.timestamp||x.from||x.date||0);
-      return {
-        time:time>2e12?Math.floor(time/1000):time,
-        open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close),volume:Number(x.volume||0)
-      };
-    }).filter(c=>c.time&&[c.open,c.high,c.low,c.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
-    return candles.length?{ok:true,candles,source:this.name,quality:0.86,latencyMs:r.latencyMs}:{ok:false,error:"Dukascopy historical response shape not recognized"};
-  }
+    u.searchParams.set("path", path);
 
-  async latestOneMinuteCandles(){
-    const u=new URL(this.base); u.searchParams.set("path","api/lastOneMinuteCandles");
-    const r=await fetchJson(u.toString(),{},this.config.requestTimeoutMs);
-    if(!r.ok || !Array.isArray(r.body)) return {ok:false,error:`Dukascopy latest HTTP ${r.status||0}`};
-    const out=[];
-    for(const x of r.body){
-      const symbol=String(x.instrument||x.symbol||x.name||"").replace(/\s*\/\s*/g,"/").trim();
-      const time=Number(x.time||x.timestamp||x.from||0);
-      const open=Number(x.open),high=Number(x.high),low=Number(x.low),close=Number(x.close);
-      if(symbol && time && [open,high,low,close].every(Number.isFinite)){
-        out.push({symbol,time:time>2e12?Math.floor(time/1000):time,open,high,low,close,volume:Number(x.volume||0)});
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        u.searchParams.set(key, String(value));
       }
     }
-    return out.length?{ok:true,candles:out,source:this.name,quality:0.86,latencyMs:r.latencyMs}:{ok:false,error:"Dukascopy latest response shape not recognized"};
+
+    return u.toString();
+  }
+
+  async request(path, params = {}) {
+    const url = this.buildUrl(path, params);
+
+    const headers = {
+      Accept: "application/json",
+      "User-Agent": "LIYOG-Blitz-AI/1.0"
+    };
+
+    const retries = Number.isFinite(
+      Number(this.config.providerRetries)
+    )
+      ? Number(this.config.providerRetries)
+      : 2;
+
+    return await fetchJsonRetry(
+      url,
+      { headers },
+      this.config.requestTimeoutMs,
+      retries
+    );
+  }
+
+  normalizeTime(value) {
+    const n = Number(value || 0);
+
+    if (!Number.isFinite(n) || n <= 0) {
+      return 0;
+    }
+
+    // Milliseconds -> seconds.
+    if (n > 2e12) {
+      return Math.floor(n / 1000);
+    }
+
+    // Some APIs can return milliseconds in the 1e12 range.
+    if (n > 2e10) {
+      return Math.floor(n / 1000);
+    }
+
+    return Math.floor(n);
+  }
+
+  normalizeCandle(x) {
+    if (!x || typeof x !== "object") {
+      return null;
+    }
+
+    const time = this.normalizeTime(
+      x.time ??
+      x.timestamp ??
+      x.from ??
+      x.date ??
+      x.startTime
+    );
+
+    const open = Number(x.open);
+    const high = Number(x.high);
+    const low = Number(x.low);
+    const close = Number(x.close);
+    const volume = Number(
+      x.volume ??
+      x.vol ??
+      0
+    );
+
+    if (
+      !time ||
+      ![open, high, low, close].every(Number.isFinite)
+    ) {
+      return null;
+    }
+
+    return {
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume: Number.isFinite(volume) ? volume : 0
+    };
+  }
+
+  normalizeSymbol(x) {
+    if (!x || typeof x !== "object") {
+      return "";
+    }
+
+    return String(
+      x.instrument ??
+      x.symbol ??
+      x.name ??
+      x.nameLong ??
+      ""
+    )
+      .replace(/\s*\/\s*/g, "/")
+      .trim()
+      .toUpperCase();
+  }
+
+  async instrumentList() {
+    const r = await this.request("api/instrumentList");
+
+    if (!r.ok || !Array.isArray(r.body)) {
+      return {
+        ok: false,
+        error:
+          r.body?.message ||
+          r.body?.error ||
+          `Dukascopy instrument HTTP ${r.status || 0}`,
+        status: r.status,
+        latencyMs: r.latencyMs
+      };
+    }
+
+    const map = new Map();
+
+    for (const x of r.body) {
+      const id = Number(x.id);
+
+      const name = String(
+        x.name ||
+        x.nameLong ||
+        ""
+      )
+        .replace(/\s*\/\s*/g, "/")
+        .trim()
+        .toUpperCase();
+
+      if (name && Number.isFinite(id)) {
+        map.set(name, id);
+      }
+    }
+
+    this.instrumentCache = map;
+
+    return {
+      ok: true,
+      map,
+      count: map.size,
+      latencyMs: r.latencyMs
+    };
+  }
+
+  async getInstrumentId(symbol) {
+    const normalized = String(symbol || "")
+      .replace(/\s*\/\s*/g, "/")
+      .trim()
+      .toUpperCase();
+
+    if (!this.instrumentCache) {
+      const list = await this.instrumentList();
+
+      if (!list.ok) {
+        return list;
+      }
+    }
+
+    const id = this.instrumentCache.get(normalized);
+
+    if (!Number.isFinite(id)) {
+      return {
+        ok: false,
+        error: `Dukascopy instrument not found: ${normalized}`
+      };
+    }
+
+    return {
+      ok: true,
+      id,
+      symbol: normalized
+    };
+  }
+
+  async historical(symbol, count = 160) {
+    const instrument = await this.getInstrumentId(symbol);
+
+    if (!instrument.ok) {
+      return instrument;
+    }
+
+    const safeCount = Math.min(
+      Math.max(Number(count) || 160, 1),
+      5000
+    );
+
+    const r = await this.request(
+      "api/historicalPrices",
+      {
+        instrument: instrument.id,
+        timeFrame: "1min",
+        count: safeCount,
+        offerSide: "B"
+      }
+    );
+
+    if (!r.ok || !Array.isArray(r.body)) {
+      return {
+        ok: false,
+        error:
+          r.body?.message ||
+          r.body?.error ||
+          `Dukascopy historical HTTP ${r.status || 0}`,
+        status: r.status,
+        latencyMs: r.latencyMs
+      };
+    }
+
+    const candles = r.body
+      .map(x => this.normalizeCandle(x))
+      .filter(Boolean)
+      .sort((a, b) => a.time - b.time);
+
+    if (!candles.length) {
+      return {
+        ok: false,
+        error:
+          "Dukascopy returned no usable historical candles",
+        status: r.status,
+        latencyMs: r.latencyMs
+      };
+    }
+
+    return {
+      ok: true,
+      candles,
+      source: this.name,
+      quality: 0.86,
+      latencyMs: r.latencyMs
+    };
+  }
+
+  async latestOneMinuteCandles() {
+    const r = await this.request(
+      "api/lastOneMinuteCandles"
+    );
+
+    if (!r.ok || !Array.isArray(r.body)) {
+      return {
+        ok: false,
+        error:
+          r.body?.message ||
+          r.body?.error ||
+          `Dukascopy latest HTTP ${r.status || 0}`,
+        status: r.status,
+        latencyMs: r.latencyMs
+      };
+    }
+
+    const candles = [];
+
+    for (const x of r.body) {
+      const symbol = this.normalizeSymbol(x);
+      const candle = this.normalizeCandle(x);
+
+      if (symbol && candle) {
+        candles.push({
+          symbol,
+          ...candle
+        });
+      }
+    }
+
+    if (!candles.length) {
+      return {
+        ok: false,
+        error:
+          "Dukascopy latest endpoint returned no usable candles",
+        status: r.status,
+        latencyMs: r.latencyMs
+      };
+    }
+
+    return {
+      ok: true,
+      candles,
+      source: this.name,
+      quality: 0.86,
+      latencyMs: r.latencyMs
+    };
+  }
+
+  async currentPrices(instrumentIds = []) {
+    const ids = Array.isArray(instrumentIds)
+      ? instrumentIds
+          .map(Number)
+          .filter(Number.isFinite)
+          .join(",")
+      : "";
+
+    const r = await this.request(
+      "api/currentPrices",
+      ids ? { instruments: ids } : {}
+    );
+
+    if (!r.ok || !Array.isArray(r.body)) {
+      return {
+        ok: false,
+        error:
+          r.body?.message ||
+          r.body?.error ||
+          `Dukascopy prices HTTP ${r.status || 0}`,
+        status: r.status,
+        latencyMs: r.latencyMs
+      };
+    }
+
+    return {
+      ok: true,
+      prices: r.body,
+      source: this.name,
+      latencyMs: r.latencyMs
+    };
   }
 }
+
