@@ -1,6 +1,7 @@
 name = "iq-option-signal-bot"
 main = "src/index.js"
 compatibility_date = "2026-08-15"
+keep_vars = true
 
 [ai]
 binding = "AI"
