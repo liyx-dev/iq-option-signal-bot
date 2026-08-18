@@ -25,6 +25,22 @@ export const DEFAULTS = {
   // rate limiter (HTTP 429). Capped the same way FX already was.
   cryptoRefreshPerRun: 3,
 
+  // FIX (Aug 2026): Cloudflare Workers FREE plan allows only 10ms of
+  // CPU time per cron invocation. Running full indicator math
+  // (EMA/RSI/ATR/MACD/ADX/Bollinger x 3 timeframes) for all ~21
+  // assets every tick blew past that limit and the Worker was
+  // killed mid-run every single time ("outcome":"exceededCpu" in
+  // live logs). Analysis now processes a small rotating slice of
+  // assets per run instead — every asset still gets analyzed
+  // regularly as the cursor cycles through, but each individual
+  // tick does far less work.
+  // Benchmarked: full 3-timeframe indicator math costs roughly
+  // 1-3ms of real CPU time per asset. Free-plan Workers get only
+  // 10ms total per cron tick, and other work in runEngine() (D1
+  // row mapping, JSON building, gap/urgency scoring) also eats
+  // into that budget. Kept deliberately small with real margin.
+  analysisPerRun: 2,
+
   providerRetries: 2,
 
   cacheMaxAgeSeconds: 180,
@@ -60,6 +76,8 @@ export function getConfig(env) {
     fxRefreshPerRun: clampInt(env.FX_REFRESH_PER_RUN, 4, 1, 8),
 
     cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 3, 1, 6),
+
+    analysisPerRun: clampInt(env.ANALYSIS_PER_RUN, 2, 1, 5),
 
     providerRetries: clampInt(env.PROVIDER_RETRIES, 2, 0, 4),
 
