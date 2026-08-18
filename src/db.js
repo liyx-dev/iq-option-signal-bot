@@ -16,25 +16,32 @@ export async function getAssets(db) {
 export async function saveCandles(db, symbol, candles, source, quality) {
   if (!candles?.length) return;
 
-  // Cap what we write per call — we only ever need the configured
-  // candle window, no point writing more.
+  // FIX (Aug 2026): Free-plan Workers cap subrequests (including
+  // each individual D1 query) at 50 per invocation. Writing 360
+  // candles with 360 separate INSERT calls blew straight past that
+  // limit and threw "Too many API requests by single Worker
+  // invocation" — confirmed via live stack trace. db.batch() sends
+  // every statement in ONE subrequest instead of one-per-row, so a
+  // full 360-candle write now costs exactly 1 subrequest, not 360.
   const rows = candles.slice(-360);
 
-  for (const c of rows) {
-    await db
-      .prepare(`
-        INSERT INTO market_candles
-        (symbol, timeframe_seconds, candle_time, open, high, low, close, volume, source, quality, received_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(symbol, timeframe_seconds, candle_time)
-        DO UPDATE SET
-          open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
-          volume=excluded.volume, source=excluded.source, quality=excluded.quality,
-          received_at=excluded.received_at
-      `)
-      .bind(symbol, 60, c.time, c.open, c.high, c.low, c.close, c.volume || 0, source, quality, Date.now())
-      .run();
-  }
+  const stmt = db.prepare(`
+    INSERT INTO market_candles
+    (symbol, timeframe_seconds, candle_time, open, high, low, close, volume, source, quality, received_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(symbol, timeframe_seconds, candle_time)
+    DO UPDATE SET
+      open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
+      volume=excluded.volume, source=excluded.source, quality=excluded.quality,
+      received_at=excluded.received_at
+  `);
+
+  const now = Date.now();
+  const batch = rows.map(c =>
+    stmt.bind(symbol, 60, c.time, c.open, c.high, c.low, c.close, c.volume || 0, source, quality, now)
+  );
+
+  await db.batch(batch);
 }
 
 export async function loadCandles(db, symbol, count = 360) {
@@ -88,6 +95,20 @@ export async function quotaUsed(db, provider, windowType, windowKey) {
   return row ? { used: Number(row.used), quota: Number(row.quota) } : { used: 0, quota: 0 };
 }
 
+// FIX (Aug 2026): the original reserveQuota made 4 separate D1 calls
+// (INSERT OR IGNORE, SELECT, UPDATE, SELECT). Called twice per
+// Twelve Data reservation (minute window + day window), that's 8 D1
+// subrequests just to check quota for ONE asset — with
+// fxRefreshPerRun=4 that alone was 32 subrequests per run, a major
+// contributor to blowing past Cloudflare Free's 50-subrequest cap
+// (confirmed via live "Too many API requests" stack trace).
+//
+// This version does it in 2 D1 calls total: one INSERT OR IGNORE to
+// seed the row if it doesn't exist, then a single atomic UPDATE
+// whose WHERE clause both checks AND reserves in one round trip
+// (SQLite guarantees this is atomic — no separate read-then-write
+// race window). We check rows-affected to know if it succeeded,
+// no follow-up SELECT needed.
 export async function reserveQuota(db, provider, windowType, windowKey, quota, credits = 1) {
   const now = Date.now();
 
@@ -96,16 +117,15 @@ export async function reserveQuota(db, provider, windowType, windowKey, quota, c
     .bind(provider, windowType, windowKey, 0, quota, now)
     .run();
 
-  const before = await quotaUsed(db, provider, windowType, windowKey);
-  if (before.used + credits > quota) return false;
-
-  await db
+  const result = await db
     .prepare(`UPDATE quota_usage SET used=used+?,updated_at=? WHERE provider=? AND window_type=? AND window_key=? AND used+?<=?`)
     .bind(credits, now, provider, windowType, windowKey, credits, quota)
     .run();
 
-  const after = await quotaUsed(db, provider, windowType, windowKey);
-  return after.used >= before.used + credits;
+  // D1's run() result includes meta.changes — 1 if the UPDATE's WHERE
+  // clause matched (meaning there was room and the reservation
+  // succeeded), 0 if the quota was already full so nothing matched.
+  return (result?.meta?.changes || 0) > 0;
 }
 
 // Gives back previously-reserved credits. Used when a multi-window
@@ -152,3 +172,4 @@ export async function cleanupStorage(db, cfg) {
     quotaRetentionDays: cfg.quotaRetentionDays
   };
 }
+
