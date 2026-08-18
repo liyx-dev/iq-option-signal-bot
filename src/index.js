@@ -4,7 +4,7 @@ import { json, formatWAT } from "./utils.js";
 import { getAssets, loadCandles, providerHealth, cleanupStorage } from "./db.js";
 
 import { TwelveDataProvider } from "./providers/twelvedata.js";
-import { CryptoCompareProvider } from "./providers/cryptocompare.js";
+import { BybitProvider } from "./providers/bybit.js";
 import { KuCoinProvider } from "./providers/kucoin.js";
 import { CoinGeckoProvider } from "./providers/coingecko.js";
 import { DukascopyProvider } from "./providers/dukascopy.js";
@@ -177,24 +177,26 @@ async function runEngine(env) {
   /*
    * PROVIDERS
    *
-   * FX chain:     Twelve Data -> Dukascopy (retired stub) -> cache
-   * Crypto chain: CryptoCompare -> KuCoin -> CoinGecko (price-only, no candles)
+   * FX chain:     Twelve Data (tiered, priority+urgency weighted) -> Dukascopy (retired stub) -> cache
+   * Crypto chain: Bybit -> KuCoin -> CoinGecko (price-only, no candles)
    *
-   * Binance, Bybit, and OANDA were all removed: Binance returns HTTP 451
-   * and Bybit returns HTTP 403 — both block Cloudflare Workers' IP
-   * ranges. OANDA requires account verification unavailable in some
-   * regions. CryptoCompare is separate infrastructure from any
-   * exchange and has not shown this blocking behavior.
+   * History: Binance returns HTTP 451 (permanent regional block) —
+   * removed. Bybit briefly returned HTTP 403 but recovered on its
+   * own (confirmed UP again) — that was a transient edge-IP abuse
+   * filter, not a permanent block, so it's back in as primary.
+   * CryptoCompare's free tier now requires an API key we don't have
+   * — removed. OANDA requires account verification unavailable in
+   * some regions — removed.
    */
 
   const td = new TwelveDataProvider(env, cfg);
   const duk = new DukascopyProvider(env, cfg);
-  const cc = new CryptoCompareProvider(cfg);
+  const bybit = new BybitProvider(cfg);
   const kucoin = new KuCoinProvider(cfg);
   const cg = new CoinGeckoProvider(env, cfg);
   const fxref = new FxRefProvider(cfg);
 
-  const providers = { td, duk, cc, kucoin, cg, fxref };
+  const providers = { td, duk, bybit, kucoin, cg, fxref };
 
 
   /*
