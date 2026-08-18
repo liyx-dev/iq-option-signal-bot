@@ -1,7 +1,7 @@
 import { getConfig } from "./config.js";
 import { json, formatWAT } from "./utils.js";
 
-import { getAssets, loadCandles, providerHealth, cleanupStorage } from "./db.js";
+import { getAssets, loadCandles, providerHealth, cleanupStorage, getScanCursor, setScanCursor } from "./db.js";
 
 import { TwelveDataProvider } from "./providers/twelvedata.js";
 import { BybitProvider } from "./providers/bybit.js";
@@ -224,9 +224,34 @@ async function runEngine(env) {
 
 
   /*
-   * STEP 3 — ANALYSIS
+   * STEP 3 — ANALYSIS (ROTATING BATCH)
+   *
+   * FIX (Aug 2026): Cloudflare Workers' FREE plan gives only 10ms of
+   * CPU time per cron invocation (confirmed via live logs showing
+   * "outcome":"exceededCpu" on every run). Running indicator math
+   * (EMA/RSI/ATR/MACD/ADX/Bollinger across 3 timeframes) for all
+   * ~21 assets every single minute is real, tight-loop JS computation
+   * that blows well past 10ms — the Worker was being killed mid-run
+   * before finishing, which is why nothing worked no matter how good
+   * the data-fetching logic was.
+   *
+   * Only fetch()/D1 calls are exempt from CPU time — the indicator
+   * math itself is not. So the fix is to analyze a small ROTATING
+   * SLICE of assets per run instead of all of them, using the
+   * existing scan_state.cursor column. Every asset still gets
+   * analyzed regularly (once every few minutes, cycling through),
+   * but each individual cron tick does far less work and should
+   * comfortably fit inside the 10ms budget.
    */
-  for (const asset of assets) {
+  const analysisCursor = await getScanCursor(env.DB);
+  const analysisLimit = Math.min(cfg.analysisPerRun, assets.length);
+  const batch = [];
+  for (let n = 0; n < analysisLimit; n++) {
+    batch.push(assets[(analysisCursor + n) % assets.length]);
+  }
+  await setScanCursor(env.DB, (analysisCursor + analysisLimit) % assets.length);
+
+  for (const asset of batch) {
     try {
       const state = await getMarketState(env.DB, asset, cfg);
       const candles = state.candles;
