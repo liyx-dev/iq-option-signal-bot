@@ -157,11 +157,20 @@ async function runEngine(env) {
 
   const cfg = getConfig(env);
 
-  // Keep D1 lean and fast.
-  try {
-    await cleanupStorage(env.DB, cfg);
-  } catch (e) {
-    console.log("Storage cleanup failed:", e.message);
+  // FIX (Aug 2026): running full cleanup (4 DELETE statements) on
+  // EVERY tick was eating into the tight subrequest budget for no
+  // real benefit — retention windows are hours/days long, so
+  // cleanup doesn't need to run every 2 minutes. Only run it
+  // roughly once per hour (every 30th tick at the current 2-minute
+  // cron interval) using the current minute as a cheap, no-extra-
+  // D1-call gate.
+  const currentMinute = new Date().getMinutes();
+  if (currentMinute % 30 === 0) {
+    try {
+      await cleanupStorage(env.DB, cfg);
+    } catch (e) {
+      console.log("Storage cleanup failed:", e.message);
+    }
   }
 
   const assets = await getAssets(env.DB);
@@ -525,4 +534,3 @@ async function sendTelegramMessage(env, text) {
     throw new Error(`Telegram HTTP ${r.status}: ${await r.text()}`);
   }
 }
-
