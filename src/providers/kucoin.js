@@ -57,3 +57,4 @@ export class KuCoinProvider {
     return { ok: true, candles, source: this.name, quality: 0.90, latencyMs: r.latencyMs };
   }
 }
+
