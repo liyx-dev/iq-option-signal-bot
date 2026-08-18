@@ -17,13 +17,17 @@ export const DEFAULTS = {
 
   requestTimeoutMs: 8500,
 
-  fxRefreshPerRun: 4,
+  // FIX (Aug 2026): each FX refresh costs ~7 D1/fetch subrequests
+  // (quota check x4, candle fetch, save, health log). Free-plan
+  // Workers cap total subrequests at 50 per invocation — with
+  // fxRefreshPerRun=4 that alone was ~28, pushing the whole run
+  // over budget (confirmed via live "Too many API requests" error).
+  // Lowered to keep real headroom alongside crypto refresh, the
+  // analysis batch, and possible Telegram sends in the same run.
+  fxRefreshPerRun: 2,
 
-  // FIX (Aug 2026): crypto used to refresh EVERY enabled crypto pair
-  // EVERY run (once a minute), which was firing 6 rapid-fire requests
-  // at KuCoin the moment CryptoCompare/Bybit failed, tripping its
-  // rate limiter (HTTP 429). Capped the same way FX already was.
-  cryptoRefreshPerRun: 3,
+  // Same reasoning — crypto refresh costs ~3 subrequests per asset.
+  cryptoRefreshPerRun: 2,
 
   // FIX (Aug 2026): Cloudflare Workers FREE plan allows only 10ms of
   // CPU time per cron invocation. Running full indicator math
@@ -73,9 +77,9 @@ export function getConfig(env) {
 
     requestTimeoutMs: clampInt(env.REQUEST_TIMEOUT_MS, 8500, 3000, 15000),
 
-    fxRefreshPerRun: clampInt(env.FX_REFRESH_PER_RUN, 4, 1, 8),
+    fxRefreshPerRun: clampInt(env.FX_REFRESH_PER_RUN, 2, 1, 8),
 
-    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 3, 1, 6),
+    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 2, 1, 6),
 
     analysisPerRun: clampInt(env.ANALYSIS_PER_RUN, 2, 1, 5),
 
