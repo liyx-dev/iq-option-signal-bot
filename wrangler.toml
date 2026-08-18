@@ -15,8 +15,11 @@ database_name = "trading_db"
 database_id = "0d926bab-27da-4f0c-b938-cf4547d30e3c"
 
 [triggers]
-# One pass per minute. The data orchestrator decides what it is allowed to request.
-crons = ["* * * * *"]
-
-
+# Every 2 minutes. Free-plan Workers get only 10ms of CPU time per
+# invocation regardless of interval, so this doesn't buy more compute
+# per tick — but it roughly doubles Twelve Data's effective daily
+# safety margin (fewer refresh attempts per hour against the 800/day
+# cap) while keeping the analysis rotation reasonably fresh (~21min
+# full cycle through all assets at analysisPerRun=2).
+crons = ["*/2 * * * *"]
 
