@@ -121,5 +121,3 @@ export async function getMarketState(db, asset, cfg) {
   const quality = assessCandles(candles, Math.floor(Date.now() / 1000), cfg.cacheMaxAgeSeconds);
   return { candles, quality };
 }
-
-
