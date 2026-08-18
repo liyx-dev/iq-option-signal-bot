@@ -1,99 +1,90 @@
-# LIYOG Blitz AI — Fix Package (Aug 2026)
+# LIYOG Blitz AI — Fix Package, Round 3 (Aug 2026)
 
-## What changed and why
-- Binance was returning HTTP 451 (geo-blocked from Cloudflare's network) — replaced with Bybit (primary) + KuCoin (fallback), both key-free and not geo-blocked.
-- Dukascopy's free candle API is retired — replaced with a harmless stub so it can't waste time in the fallback chain.
-- OANDA removed (you can't get Nigerian-eligible credentials) — no longer imported anywhere.
-- Fixed the bug causing 12 of 15 FX pairs to stay stuck "WARMING_UP" forever: the refresh logic now prioritizes whichever assets have gaps or stale data, instead of a blind round-robin.
-- Fixed a Twelve Data quota leak where a failed reservation could silently burn a minute-credit without giving it back.
-- Fixed `/trigger` and `/outcome` auth to also accept `?key=YOUR_ADMIN_SECRET` in the URL, so you can trigger a run straight from your phone's browser address bar.
-- Added support for more crypto pairs (ETH, SOL, XRP, LTC, DOGE) via `add_crypto_pairs.sql` — only enable the ones your IQ Option Blitz asset list actually offers.
+This is the complete, current state of every fix so far. It supersedes
+rounds 1 and 2 — just deploy everything in this package as-is.
 
-## Files to REPLACE in your GitHub repo (same path, overwrite content)
-- `src/index.js`
-- `src/data-orchestrator.js`
-- `src/db.js`
-- `src/quota-manager.js`
-- `src/providers/dukascopy.js`
+## What's in this round
 
-## Files to ADD (new paths)
-- `src/providers/bybit.js`
-- `src/providers/kucoin.js`
-- `src/providers/fxref.js`
+**1. Crypto source fixed for real this time.**
+CryptoCompare's free tier now requires an API key (confirmed via a
+live HTTP 401 in your own /health output) — removed. Bybit briefly
+403'd but recovered on its own (confirmed UP, 17ms) — that was a
+transient edge-IP filter, not a permanent block like Binance's.
+Bybit is back in as primary crypto source, KuCoin as fallback.
 
-## Files to DELETE from your repo
-- `src/providers/binance.js`
-- `src/providers/oanda.js`
+**2. Smart Twelve Data allocation — the "tiered budget" you asked for.**
+New file `src/refresh-priority.js` replaces the old flat gap-priority
+logic. It now ranks assets by:
+  - **Tier** (from each asset's `priority` column in asset_registry —
+    majors like EUR/USD, GBP/USD, USD/JPY already have priority
+    90-95, so they land in the top tier automatically, no schema
+    change needed)
+  - **Urgency** (gaps, staleness, never-fetched) within that tier
 
-## SQL to run once against your D1 database
-- `add_crypto_pairs.sql` — via Cloudflare Dashboard → D1 → trading_db → Console. Edit it first to remove any pair not actually on your IQ Option Blitz asset list.
+This means majors get refreshed most often under normal conditions
+(spending the scarce 8/min, 800/day budget where signal quality is
+highest), while a lower-priority pair that's gone badly stale can
+still jump the queue via its urgency score — nothing is ever
+permanently starved. Same allocator is now shared by both FX and
+crypto refresh logic.
 
-## After deploying
-1. Wait a few minutes for at least one cron tick to run (cron runs every minute automatically — you don't need to trigger it manually).
-2. Check `https://iq-option-signal-bot.goddayprincess1.workers.dev/health` — you should see `bybit` and `kucoin` instead of `binance`, and `dukascopy` should stop accumulating errors (still shows DOWN, but consecutive_errors won't matter since it's now instant/free to call).
-3. Check `/status` — over the following ~10-15 minutes, watch more FX pairs flip from `WARMING_UP` to `READY` as gaps get healed.
-4. If you still want to manually trigger a run: `https://iq-option-signal-bot.goddayprincess1.workers.dev/trigger?key=YOUR_ADMIN_SECRET`
+**3. Signals already don't wait for every pair to be ready — confirmed.**
+Your instinct that "once any pair is ready it should be analyzed" is
+already how index.js's main loop works: it iterates every asset
+independently, and READY assets get scored regardless of what state
+other assets are in. This part didn't need a fix. What DOES need
+watching is the scoring gate itself (score >= 76, data quality,
+timeframe agreement) — see "How to see WHY a pair didn't signal"
+below.
 
-# LIYOG Blitz AI — Fix Package, Round 2 (Aug 2026)
-
-## What changed since round 1
-Your `/health` check after round 1 showed real progress (FX pairs went
-from 3 READY to 11 READY — the gap-priority fix works) but revealed two
-new problems:
-- **Bybit → HTTP 403.** Cloudflare Workers' IP ranges are blocked by
-  Bybit too, same class of problem as Binance's HTTP 451.
-- **KuCoin → HTTP 429.** Not blocked, just rate-limited — because
-  crypto refresh was hitting ALL 6 crypto pairs every single minute,
-  which is too fast for KuCoin's public tier.
-
-## Round 2 fixes
-- Replaced Bybit with **CryptoCompare** (`min-api.cryptocompare.com`)
-  as the primary crypto candle source — no key required, purpose-built
-  for OHLCV data, and separate infrastructure from Binance/Bybit so it
-  isn't subject to the same IP blocking.
-- Crypto refresh is now **capped and prioritized** the same way FX
-  already was (`cryptoRefreshPerRun`, default 3) — it no longer fires
-  a request for every crypto pair every minute, which is what was
-  tripping KuCoin's rate limiter.
-- KuCoin kept as the crypto fallback behind CryptoCompare, now used
-  far less often so it should stop 429-ing.
-
-## Files to REPLACE in your GitHub repo (same path, overwrite content)
+## Files to REPLACE (overwrite existing paths in your repo)
 - `src/index.js`
 - `src/data-orchestrator.js`
 - `src/config.js`
 - `src/db.js`
 - `src/quota-manager.js`
 - `src/providers/dukascopy.js`
-- `src/providers/kucoin.js` (unchanged from round 1, included for completeness)
+- `src/providers/bybit.js`
+- `src/providers/kucoin.js`
+- `src/providers/fxref.js`
 
 ## Files to ADD (new)
-- `src/providers/cryptocompare.js`
-- `src/providers/fxref.js` (if not already added from round 1)
+- `src/refresh-priority.js`
 
 ## Files to DELETE from your repo
-- `src/providers/binance.js` (if not already deleted)
-- `src/providers/oanda.js` (if not already deleted)
-- `src/providers/bybit.js` — **new in this round**: Bybit is blocked
-  (HTTP 403) from Cloudflare's network, same as Binance. Remove it.
+- `src/providers/binance.js`
+- `src/providers/oanda.js`
+- `src/providers/cryptocompare.js` — if you added this in round 2,
+  remove it now. It needs a paid-tier key we don't have.
 
-## New environment variable (optional)
-- `CRYPTO_REFRESH_PER_RUN` — how many crypto pairs to refresh per
-  cron tick. Defaults to 3 if not set. You don't need to add this
-  unless you want to tune it later.
+## wrangler.toml
+Add this block near the top (you already did this per our
+conversation — just confirming it stays in place):
+```toml
+[observability]
+enabled = true
+```
 
-## SQL (only if you haven't run it yet from round 1)
-- `add_crypto_pairs.sql` — adds ETH/SOL/XRP/LTC/DOGE to the asset
-  registry. Edit it first to remove any pair not actually on your IQ
-  Option Blitz asset list before running it.
+## How to see WHY a pair didn't signal (use this instead of guessing)
+Hit `/trigger?key=YOUR_ADMIN_SECRET` in your browser. The JSON
+response's `results` array shows EVERY asset's outcome for that run:
+- `"status":"READY"` pairs that didn't qualify show `"status":"FILTERED"`
+  with a `reason` field (e.g. "Score below threshold (68/76)" or
+  "Insufficient multi-timeframe agreement") and the actual `score`.
+- This tells you directly whether the engine is being appropriately
+  selective (working as intended — short-expiry trading needs a high
+  bar) versus something being broken. Going 30-60+ minutes without a
+  signal while pairs show FILTERED with real scores close to the
+  threshold is normal, disciplined behavior, not a bug.
+
+## SQL (only if not already run)
+`add_crypto_pairs.sql` — adds ETH/SOL/XRP/LTC/DOGE. Edit first to
+keep only pairs actually on your IQ Option Blitz asset list.
 
 ## After deploying
-1. Wait for a few cron ticks (runs every minute automatically).
-2. Check `/health` — expect to see `cryptocompare` (UP) and `kucoin`
-   (ideally UP now, or at least no longer showing rapid 429s), with
-   `bybit` and `binance` both gone from the list entirely (once their
-   old rows age out — they'll just stop updating, which is fine).
-3. Check `/status` — crypto pairs (BTC, ETH, SOL, etc.) should start
-   accumulating candles and move toward READY over the next 10-20
-   minutes, same as the FX pairs did in round 1.
-4. Manual trigger: `https://iq-option-signal-bot.goddayprincess1.workers.dev/trigger?key=YOUR_ADMIN_SECRET`
+1. Check `/health` — expect `bybit: UP`, `kucoin` rarely touched,
+   `twelvedata: UP`, `cryptocompare` gone entirely (stops updating).
+2. Check `/status` — crypto pairs should start accumulating fresh
+   candles again (source: "bybit" instead of stale "kucoin").
+3. Check `/trigger?key=...` — read the `results` array to see real
+   scores per asset, not just whether Telegram fired.
