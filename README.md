@@ -1,90 +1,69 @@
-# LIYOG Blitz AI — Fix Package, Round 3 (Aug 2026)
+# LIYOG Blitz AI — Fix Package, Round 4: THE REAL ROOT CAUSE (Aug 2026)
 
-This is the complete, current state of every fix so far. It supersedes
-rounds 1 and 2 — just deploy everything in this package as-is.
-
-## What's in this round
-
-**1. Crypto source fixed for real this time.**
-CryptoCompare's free tier now requires an API key (confirmed via a
-live HTTP 401 in your own /health output) — removed. Bybit briefly
-403'd but recovered on its own (confirmed UP, 17ms) — that was a
-transient edge-IP filter, not a permanent block like Binance's.
-Bybit is back in as primary crypto source, KuCoin as fallback.
-
-**2. Smart Twelve Data allocation — the "tiered budget" you asked for.**
-New file `src/refresh-priority.js` replaces the old flat gap-priority
-logic. It now ranks assets by:
-  - **Tier** (from each asset's `priority` column in asset_registry —
-    majors like EUR/USD, GBP/USD, USD/JPY already have priority
-    90-95, so they land in the top tier automatically, no schema
-    change needed)
-  - **Urgency** (gaps, staleness, never-fetched) within that tier
-
-This means majors get refreshed most often under normal conditions
-(spending the scarce 8/min, 800/day budget where signal quality is
-highest), while a lower-priority pair that's gone badly stale can
-still jump the queue via its urgency score — nothing is ever
-permanently starved. Same allocator is now shared by both FX and
-crypto refresh logic.
-
-**3. Signals already don't wait for every pair to be ready — confirmed.**
-Your instinct that "once any pair is ready it should be analyzed" is
-already how index.js's main loop works: it iterates every asset
-independently, and READY assets get scored regardless of what state
-other assets are in. This part didn't need a fix. What DOES need
-watching is the scoring gate itself (score >= 76, data quality,
-timeframe agreement) — see "How to see WHY a pair didn't signal"
-below.
-
-## Files to REPLACE (overwrite existing paths in your repo)
-- `src/index.js`
-- `src/data-orchestrator.js`
-- `src/config.js`
-- `src/db.js`
-- `src/quota-manager.js`
-- `src/providers/dukascopy.js`
-- `src/providers/bybit.js`
-- `src/providers/kucoin.js`
-- `src/providers/fxref.js`
-
-## Files to ADD (new)
-- `src/refresh-priority.js`
-
-## Files to DELETE from your repo
-- `src/providers/binance.js`
-- `src/providers/oanda.js`
-- `src/providers/cryptocompare.js` — if you added this in round 2,
-  remove it now. It needs a paid-tier key we don't have.
-
-## wrangler.toml
-Add this block near the top (you already did this per our
-conversation — just confirming it stays in place):
-```toml
-[observability]
-enabled = true
+## What we finally found
+Your Cloudflare Logs showed every single cron run dying with:
+```
+"outcome": "exceededCpu", "cpuTimeMs": 10
 ```
 
-## How to see WHY a pair didn't signal (use this instead of guessing)
-Hit `/trigger?key=YOUR_ADMIN_SECRET` in your browser. The JSON
-response's `results` array shows EVERY asset's outcome for that run:
-- `"status":"READY"` pairs that didn't qualify show `"status":"FILTERED"`
-  with a `reason` field (e.g. "Score below threshold (68/76)" or
-  "Insufficient multi-timeframe agreement") and the actual `score`.
-- This tells you directly whether the engine is being appropriately
-  selective (working as intended — short-expiry trading needs a high
-  bar) versus something being broken. Going 30-60+ minutes without a
-  signal while pairs show FILTERED with real scores close to the
-  threshold is normal, disciplined behavior, not a bug.
+**Free-plan Cloudflare Workers get only 10ms of CPU time per cron
+invocation.** Your engine was computing full indicator math (EMA,
+RSI, ATR, MACD, ADX, Bollinger Bands) across 3 timeframes for up to
+21 assets EVERY MINUTE — genuinely heavy computation that blew past
+10ms and got killed before finishing. This is why nothing worked no
+matter how good the provider/data-fetching fixes were: the engine
+never got far enough to send a signal.
 
-## SQL (only if not already run)
-`add_crypto_pairs.sql` — adds ETH/SOL/XRP/LTC/DOGE. Edit first to
-keep only pairs actually on your IQ Option Blitz asset list.
+This also explains why your ORIGINAL BTC-only setup worked — 1 asset
+was cheap enough to fit under 10ms. Scaling to 21 assets broke it.
+
+## The fix (no $5/month required)
+1. **Rotating analysis batches.** Instead of analyzing all ~21 assets
+   every tick, the engine now analyzes only 2 assets per run
+   (`analysisPerRun`), cycling through the full list using the
+   existing `scan_state.cursor` column. Benchmarked: full 3-timeframe
+   analysis costs roughly 1-3ms per asset, so 2 assets leaves real
+   margin under the 10ms cap.
+2. **Cron interval changed from every 1 minute to every 2 minutes.**
+   This doesn't add CPU time per tick (that's fixed at 10ms
+   regardless of interval) — but it roughly doubles Twelve Data's
+   effective safety margin against the 800/day quota, since refresh
+   attempts now happen half as often.
+3. Every asset still gets analyzed regularly — a full rotation
+   through 21 assets at 2/tick, every 2 minutes, takes about 21
+   minutes per asset. Slower than the old (broken) "analyze
+   everyone every minute" design, but this version actually runs to
+   completion instead of being killed every time.
+
+## IMPORTANT — this may still need one more tuning round
+I benchmarked the indicator math in a generic Node environment, not
+on your actual Cloudflare account, so `analysisPerRun: 2` is an
+educated estimate, not a guarantee. After deploying:
+- Check Cloudflare Logs again for `"outcome":"exceededCpu"` entries.
+- If you still see them, tell me and we'll drop `analysisPerRun` to 1
+  via the `ANALYSIS_PER_RUN` environment variable (no code redeploy
+  needed — just add/edit that variable in Cloudflare's dashboard).
+- If logs look clean (no CPU errors), we can cautiously try raising
+  it back up later.
+
+## Files to REPLACE
+- `wrangler.toml` — cron changed to `*/2 * * * *`, observability confirmed enabled
+- `src/index.js` — rotating analysis batch logic
+- `src/config.js` — new `analysisPerRun` setting
+- `src/data-orchestrator.js`, `src/db.js`, `src/quota-manager.js`,
+  `src/providers/dukascopy.js`, `src/providers/bybit.js`,
+  `src/providers/kucoin.js`, `src/providers/fxref.js` — carried over
+  from round 3, unchanged in this round
+
+## New optional environment variable
+- `ANALYSIS_PER_RUN` — how many assets to analyze per tick. Defaults
+  to 2. Lower this to 1 if you still see CPU errors after deploying.
 
 ## After deploying
-1. Check `/health` — expect `bybit: UP`, `kucoin` rarely touched,
-   `twelvedata: UP`, `cryptocompare` gone entirely (stops updating).
-2. Check `/status` — crypto pairs should start accumulating fresh
-   candles again (source: "bybit" instead of stale "kucoin").
-3. Check `/trigger?key=...` — read the `results` array to see real
-   scores per asset, not just whether Telegram fired.
+1. Watch Cloudflare Logs for a few ticks (every 2 minutes now, so
+   check back after ~10 minutes for several data points).
+2. Look specifically for `"outcome"` in the logs — should say
+   something other than `"exceededCpu"` (e.g. `"ok"`).
+3. Once confirmed clean, give it 30-60 minutes for candles to
+   accumulate and the analysis rotation to cover multiple assets,
+   then check `/status` and `/trigger?key=...` again.
