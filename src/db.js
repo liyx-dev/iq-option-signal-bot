@@ -139,15 +139,30 @@ export async function releaseQuota(db, provider, windowType, windowKey, credits 
     .run();
 }
 
-export async function getScanCursor(db) {
-  const row = await db.prepare("SELECT cursor FROM scan_state WHERE id=1").first();
-  return Number(row?.cursor || 0);
+// FIX (Aug 2026): analysis now needs two INDEPENDENT rotation
+// cursors (FX and crypto) instead of one shared cursor, so FX pairs
+// can get more frequent analysis attention without crypto ever
+// being fully starved. Rather than a schema migration for a second
+// scan_state row, this reuses the existing quota_usage table's
+// flexible (provider, window_type, window_key, used) shape as a
+// simple keyed cursor store — "used" holds the cursor value.
+export async function getScanCursor(db, group = "default") {
+  const row = await db
+    .prepare("SELECT used FROM quota_usage WHERE provider='scan_cursor' AND window_type=? AND window_key='cursor'")
+    .bind(group)
+    .first();
+  return Number(row?.used || 0);
 }
 
-export async function setScanCursor(db, cursor) {
+export async function setScanCursor(db, cursor, group = "default") {
+  const now = Date.now();
   await db
-    .prepare("UPDATE scan_state SET cursor=?,last_scan=?,updated_at=? WHERE id=1")
-    .bind(cursor, Date.now(), Date.now())
+    .prepare(`
+      INSERT INTO quota_usage(provider,window_type,window_key,used,quota,updated_at)
+      VALUES('scan_cursor',?,'cursor',?,999999,?)
+      ON CONFLICT(provider,window_type,window_key) DO UPDATE SET used=excluded.used, updated_at=excluded.updated_at
+    `)
+    .bind(group, cursor, now)
     .run();
 }
 
