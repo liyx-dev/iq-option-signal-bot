@@ -26,8 +26,12 @@ export const DEFAULTS = {
   // analysis batch, and possible Telegram sends in the same run.
   fxRefreshPerRun: 2,
 
-  // Same reasoning — crypto refresh costs ~3 subrequests per asset.
-  cryptoRefreshPerRun: 2,
+  // Same reasoning applies to subrequest/CPU budget, but crypto has
+  // NO daily quota ceiling (Bybit is a free, unlimited-for-our-scale
+  // public endpoint) — unlike Twelve Data's 800/day. So crypto can
+  // safely refresh more assets per tick than FX; only the shared
+  // 50-subrequest/10ms-CPU ceiling limits it, not a provider quota.
+  cryptoRefreshPerRun: 4,
 
   // FIX (Aug 2026): Cloudflare Workers FREE plan allows only 10ms of
   // CPU time per cron invocation. Running full indicator math
@@ -44,6 +48,13 @@ export const DEFAULTS = {
   // row mapping, JSON building, gap/urgency scoring) also eats
   // into that budget. Kept deliberately small with real margin.
   analysisPerRun: 2,
+
+  // FIX (Aug 2026): the user trades FX pairs far more than crypto.
+  // This is the share of analysisPerRun's slots given to FX vs
+  // crypto each tick — 0.7 means roughly 70% FX, 30% crypto. FX and
+  // crypto use independent rotation cursors so neither group is ever
+  // fully starved, but FX gets the larger share of attention.
+  analysisFxRatio: 0.7,
 
   providerRetries: 2,
 
@@ -79,9 +90,11 @@ export function getConfig(env) {
 
     fxRefreshPerRun: clampInt(env.FX_REFRESH_PER_RUN, 2, 1, 8),
 
-    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 2, 1, 6),
+    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 4, 1, 8),
 
     analysisPerRun: clampInt(env.ANALYSIS_PER_RUN, 2, 1, 5),
+
+    analysisFxRatio: clampNum(env.ANALYSIS_FX_RATIO, 0.7, 0, 1),
 
     providerRetries: clampInt(env.PROVIDER_RETRIES, 2, 0, 4),
 
@@ -102,4 +115,3 @@ function clampInt(v, f, min, max) {
   const n = Math.floor(Number(v));
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : f;
 }
-
