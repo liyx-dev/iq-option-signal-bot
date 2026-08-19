@@ -22,3 +22,4 @@ database_id = "0d926bab-27da-4f0c-b938-cf4547d30e3c"
 # cap) while keeping the analysis rotation reasonably fresh (~21min
 # full cycle through all assets at analysisPerRun=2).
 crons = ["*/2 * * * *"]
+
