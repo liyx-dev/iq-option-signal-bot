@@ -71,10 +71,18 @@ export async function refreshCrypto(env, cfg, assets, p) {
     const asset = ranked[n];
     const symbol = asset.provider_symbol || asset.symbol; // e.g. "BTCUSDT"
 
-    // Primary: Bybit. Confirmed working (UP, ~17ms) after an earlier
-    // transient 403 cleared on its own — Cloudflare's rotating edge
-    // IPs occasionally trip a provider's short-lived abuse filter,
-    // which is different from Binance's permanent regional block.
+    // FIX (Aug 2026): back-to-back Bybit calls within the same tick
+    // were tripping its edge-IP abuse filter (HTTP 403) under burst
+    // load. A small stagger between calls costs wall-clock time, not
+    // CPU time or subrequests (both of which stay unaffected), and
+    // wall-clock has real headroom (~14s used of a much larger
+    // budget per the live logs) — so this is free insurance.
+    if (n > 0) await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Primary: Bybit. Occasional transient 403s under burst load are
+    // a short-lived edge-IP abuse filter, not a permanent block like
+    // Binance's HTTP 451 — confirmed by /trigger calls at lower
+    // burst succeeding right after a run of 403s.
     let r = await p.bybit.candles(symbol, cfg.candleCount);
     await providerHealth(env.DB, "bybit", r.ok, r.latencyMs, r.ok ? null : String(r.error || "ERROR").slice(0, 80));
 
