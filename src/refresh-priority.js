@@ -1,25 +1,23 @@
 // ============================================================
 // SMART TWELVE DATA ALLOCATOR
 //
-// FIX (Aug 2026): the original version called loadCandles() (a full
-// SELECT of up to 360 rows) ONCE PER ASSET just to compute urgency —
-// ~21 separate D1 subrequests before a single refresh even started.
-// Combined with saveCandles' old per-row INSERT loop, this blew past
-// Cloudflare Free plan's 50-subrequest-per-invocation cap and the
-// engine threw "Too many API requests by single Worker invocation"
-// on every run (confirmed via live stack trace).
+// Ranking logic: priority tier first (majors like EUR/USD, GBP/USD,
+// USD/JPY get refreshed more often under normal conditions), urgency
+// (coverage gap + staleness) breaks ties AND can override tier when
+// a lower-priority pair has gone badly stale.
 //
-// This version replaces per-asset loadCandles calls with ONE cheap
-// aggregate SQL query per asset group (FX or crypto) that computes
-// candle count + latest candle time directly in SQLite — a single
-// subrequest covers the whole group instead of one per asset.
-//
-// Ranking logic unchanged: priority tier first (majors like EUR/USD,
-// GBP/USD, USD/JPY get refreshed more often), urgency (coverage gap
-// + staleness) breaks ties and lets a badly-behind minor pair still
-// jump the queue so nothing is permanently starved.
+// FIX (Aug 2026): live /status data over several hours showed
+// low-priority pairs (CHFJPY, EURCAD, NZDCAD — all priority 70)
+// stuck 25+ hours stale while higher-tier pairs kept getting
+// refreshed every cycle. Root cause: urgency was capped at 100
+// (`Math.min(100, ...)`) while tier contributed 100-300 to the
+// combined score — so a starved tier-1 pair (max combined: 100+100
+// =200) could NEVER outrank a healthy tier-3 pair (300+0=300), no
+// matter how stale it got. The "nothing is ever starved" comment
+// was aspirational but the math didn't deliver it. Fixed by scaling
+// urgency's ceiling well above the maximum possible tier gap, so
+// genuine staleness can break through and force a refresh.
 // ============================================================
-import { assessCandles } from "./data-quality.js";
 
 function tierOf(priority) {
   if (priority >= 90) return 3; // majors
@@ -59,19 +57,24 @@ export async function rankByPriorityAndUrgency(db, cfg, assets) {
   const health = await getHealthSummary(db, symbols);
   const nowSec = Math.floor(Date.now() / 1000);
 
+  // Tier contributes at most 300 (tier 3 x 100). Urgency's ceiling
+  // is set well above that (2000) so a sufficiently stale/gappy pair
+  // can always eventually outrank even a perfectly healthy major —
+  // this is what actually guarantees no pair is starved forever.
+  const MAX_URGENCY = 2000;
+
   const scored = assets.map(asset => {
     const h = health.get(asset.symbol);
 
     let urgency;
     if (!h || h.candleCount === 0) {
-      urgency = 1000; // never fetched — always wins immediately
+      urgency = MAX_URGENCY; // never fetched — always wins immediately
     } else {
       const ageSeconds = Math.max(0, nowSec - h.latestTime);
-      // Lightweight staleness/coverage proxy without loading every
-      // row: fewer candles than the target window, or an old latest
-      // candle, both signal "needs a refresh".
       const coverageGap = Math.max(0, cfg.candleCount - h.candleCount);
-      urgency = coverageGap * 2 + Math.min(100, Math.floor(ageSeconds / 30));
+      // Staleness grows without an artificial cap now — a pair that's
+      // gone hours stale accumulates enough urgency to beat any tier.
+      urgency = Math.min(MAX_URGENCY, coverageGap * 2 + Math.floor(ageSeconds / 30));
     }
 
     const tier = tierOf(Number(asset.priority) || 50);
