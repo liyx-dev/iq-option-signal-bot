@@ -26,12 +26,17 @@ export const DEFAULTS = {
   // analysis batch, and possible Telegram sends in the same run.
   fxRefreshPerRun: 2,
 
-  // Same reasoning applies to subrequest/CPU budget, but crypto has
-  // NO daily quota ceiling (Bybit is a free, unlimited-for-our-scale
-  // public endpoint) — unlike Twelve Data's 800/day. So crypto can
-  // safely refresh more assets per tick than FX; only the shared
-  // 50-subrequest/10ms-CPU ceiling limits it, not a provider quota.
-  cryptoRefreshPerRun: 4,
+  // FIX (Aug 2026, take 2): raising this to 4 caused Bybit to trip
+  // its edge-IP abuse filter again (HTTP 403) under the higher
+  // burst rate, which then cascaded into KuCoin fallback 429s for
+  // all 4 assets in the same tick. Bybit is NOT permanently blocked
+  // — /trigger calls at lower burst still succeed — so this is a
+  // request-RATE sensitivity, not a hard wall. Lowered back to 3 as
+  // a safer middle ground between refresh speed and provider
+  // stability. Crypto still has no daily quota ceiling like Twelve
+  // Data's 800/day, so this is purely a provider-politeness limit,
+  // not a budget constraint.
+  cryptoRefreshPerRun: 3,
 
   // FIX (Aug 2026): Cloudflare Workers FREE plan allows only 10ms of
   // CPU time per cron invocation. Running full indicator math
@@ -90,7 +95,7 @@ export function getConfig(env) {
 
     fxRefreshPerRun: clampInt(env.FX_REFRESH_PER_RUN, 2, 1, 8),
 
-    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 4, 1, 8),
+    cryptoRefreshPerRun: clampInt(env.CRYPTO_REFRESH_PER_RUN, 3, 1, 8),
 
     analysisPerRun: clampInt(env.ANALYSIS_PER_RUN, 2, 1, 5),
 
@@ -115,3 +120,4 @@ function clampInt(v, f, min, max) {
   const n = Math.floor(Number(v));
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : f;
 }
+
