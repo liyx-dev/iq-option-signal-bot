@@ -51,4 +51,3 @@ export async function reserveTwelveData(db, cfg, credits = 1) {
 
   return true;
 }
-
