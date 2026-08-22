@@ -51,3 +51,4 @@ export function assessCandles(
     reason: clean.length < 300 ? "WARMING_UP" : gaps > 0 ? "GAPS" : age > maxAge ? "STALE" : "READY"
   };
 }
+
