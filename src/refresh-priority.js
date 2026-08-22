@@ -86,3 +86,4 @@ export async function rankByPriorityAndUrgency(db, cfg, assets) {
   scored.sort((a, b) => b.combined - a.combined);
   return scored.map(s => s.asset);
 }
+
