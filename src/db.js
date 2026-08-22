@@ -166,6 +166,60 @@ export async function setScanCursor(db, cursor, group = "default") {
     .run();
 }
 
+// ============================================================
+// RECENT SCORES — best-of-batch signal selection
+//
+// Every time an asset is analyzed (whether eligible or not), its
+// result is upserted here. This lets the engine compare ALL
+// recently-scored assets — not just the 1-2 in this exact tick's
+// rotation batch — and send a signal only for the single strongest
+// one across a full rotation window, per the user's request.
+// ============================================================
+
+export async function saveScore(db, symbol, result) {
+  await db.prepare(`
+    INSERT INTO recent_scores
+    (symbol,direction,score,confidence,data_quality,agreement,regime,setup,reason,external_confirmation,eligible,scored_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(symbol) DO UPDATE SET
+      direction=excluded.direction, score=excluded.score, confidence=excluded.confidence,
+      data_quality=excluded.data_quality, agreement=excluded.agreement, regime=excluded.regime,
+      setup=excluded.setup, reason=excluded.reason, external_confirmation=excluded.external_confirmation,
+      eligible=excluded.eligible, scored_at=excluded.scored_at
+  `).bind(
+    symbol, result.direction || null, result.score ?? null, result.confidence ?? null,
+    result.dataQuality ?? null, result.agreement ?? null, result.regime || null,
+    result.setup || null, result.reason || null, result.externalConfirmation || null,
+    result.eligible ? 1 : 0, Date.now()
+  ).run();
+}
+
+// Returns the single highest-scoring ELIGIBLE asset scored within
+// the last `maxAgeMs` — the "best of a full rotation window" the
+// user asked for, without needing to recompute all assets in one
+// CPU-limited tick.
+export async function getBestRecentScore(db, maxAgeMs) {
+  const cutoff = Date.now() - maxAgeMs;
+  const row = await db.prepare(`
+    SELECT * FROM recent_scores
+    WHERE eligible=1 AND scored_at >= ?
+    ORDER BY score DESC LIMIT 1
+  `).bind(cutoff).first();
+  return row || null;
+}
+
+// Full distribution for the /scores diagnostic endpoint — every
+// asset's most recent score, freshest first, regardless of whether
+// it was eligible.
+export async function getAllRecentScores(db) {
+  const { results } = await db.prepare(`
+    SELECT * FROM recent_scores ORDER BY scored_at DESC
+  `).all();
+  return results || [];
+}
+    .run();
+}
+
 export async function cleanupStorage(db, cfg) {
   const now = Date.now();
 
