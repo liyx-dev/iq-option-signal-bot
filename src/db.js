@@ -217,8 +217,7 @@ export async function getAllRecentScores(db) {
   `).all();
   return results || [];
 }
-    .run();
-}
+    
 
 export async function cleanupStorage(db, cfg) {
   const now = Date.now();
