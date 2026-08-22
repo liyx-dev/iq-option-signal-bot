@@ -195,3 +195,4 @@ export function snapshot(candles) {
     momentum, trend, structureTrend: S.trend
   };
 }
+
