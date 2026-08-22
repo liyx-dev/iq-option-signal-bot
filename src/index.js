@@ -1,15 +1,15 @@
 import { getConfig } from "./config.js";
 import { json, formatWAT } from "./utils.js";
 
-import { getAssets, loadCandles, providerHealth, cleanupStorage, getScanCursor, setScanCursor } from "./db.js";
+import {
+  getAssets, loadCandles, providerHealth, cleanupStorage,
+  getScanCursor, setScanCursor, saveScore, getBestRecentScore, getAllRecentScores
+} from "./db.js";
 
 import { TwelveDataProvider } from "./providers/twelvedata.js";
-import { BybitProvider } from "./providers/bybit.js";
-import { KuCoinProvider } from "./providers/kucoin.js";
-import { CoinGeckoProvider } from "./providers/coingecko.js";
 import { DukascopyProvider } from "./providers/dukascopy.js";
 
-import { refreshFX, refreshCrypto, getMarketState } from "./data-orchestrator.js";
+import { refreshFX, getMarketState } from "./data-orchestrator.js";
 
 import { analyze } from "./analysis.js";
 import { reviewCandidate } from "./ai.js";
@@ -32,8 +32,8 @@ export default {
       return json({
         status: "ok",
         service: "LIYOG Blitz AI Signal Engine",
-        mode: "signal-only",
-        message: "Market-data fusion engine active."
+        mode: "fx-only, best-of-rotation",
+        message: "Forex-focused quant signal engine active."
       });
     }
 
@@ -45,6 +45,14 @@ export default {
 
     if (url.pathname === "/status") {
       return await status(env);
+    }
+
+
+    // NEW: score distribution across all assets, so the user can
+    // see exactly how close (or far) real market conditions are
+    // from the MIN_SIGNAL_SCORE bar, without waiting on a signal.
+    if (url.pathname === "/scores") {
+      return await scores(env);
     }
 
 
@@ -121,7 +129,7 @@ export default {
     }
 
 
-    return new Response("LIYOG Blitz AI Signal Engine active.", { status: 200 });
+    return new Response("LIYOG Blitz AI Signal Engine active. FX-only, best-of-rotation mode.", { status: 200 });
 
   }
 
@@ -130,9 +138,6 @@ export default {
 
 /* ============================================================
    AUTH
-   Accepts either an Authorization header OR a ?key= query param,
-   so the admin endpoints can be triggered from a plain browser
-   address bar (no header-editing tool required) as well as curl.
 ============================================================ */
 
 function authorized(request, env) {
@@ -150,19 +155,29 @@ function authorized(request, env) {
 
 /* ============================================================
    MAIN ENGINE
+============================================================
+
+   FIX (Aug 2026, FX-only rebuild):
+   - Crypto (Bybit/KuCoin) removed entirely. The user trades FX
+     more and wants this Worker specialized on FX efficiency; crypto
+     can become its own separate, simpler Worker later.
+   - "Loop through everyone, pick the strongest" is what the user
+     asked for, but CANNOT literally happen in one 10ms tick — full
+     analysis of all ~15 FX pairs at once was exactly what caused
+     the original CPU-limit crashes. Instead: every tick analyzes a
+     small rotating batch (as before) but now SAVES every result
+     (eligible or not) to recent_scores. Selection then looks at ALL
+     assets scored within the last `bestOfWindowMs` (a full rotation
+     cycle) and sends a signal only for the single highest-scoring
+     ELIGIBLE one — "best of the rotation window", not "best of
+     this exact tick".
 ============================================================ */
 
 async function runEngine(env) {
 
   const cfg = getConfig(env);
 
-  // FIX (Aug 2026): running full cleanup (4 DELETE statements) on
-  // EVERY tick was eating into the tight subrequest budget for no
-  // real benefit — retention windows are hours/days long, so
-  // cleanup doesn't need to run every 2 minutes. Only run it
-  // roughly once per hour (every 30th tick at the current 2-minute
-  // cron interval) using the current minute as a cheap, no-extra-
-  // D1-call gate.
+  // Cleanup only runs occasionally to save subrequest budget.
   const currentMinute = new Date().getMinutes();
   if (currentMinute % 30 === 0) {
     try {
@@ -173,101 +188,48 @@ async function runEngine(env) {
   }
 
   const assets = await getAssets(env.DB);
+  const fxAssets = assets.filter(a => a.kind === "FX");
 
-  if (!assets.length) {
-    return { status: "ok", assets: 0, candidates: 0, sent: 0, errors: 0 };
+  if (!fxAssets.length) {
+    return { status: "ok", assets: 0, scored: 0, sent: 0, errors: 0 };
   }
 
   const started = Date.now();
   const results = [];
-  const candidates = [];
 
   /*
-   * PROVIDERS
-   *
-   * FX chain:     Twelve Data (tiered, priority+urgency weighted) -> Dukascopy (retired stub) -> cache
-   * Crypto chain: Bybit -> KuCoin -> CoinGecko (price-only, no candles)
-   *
-   * History: Binance returns HTTP 451 (permanent regional block) —
-   * removed. Bybit briefly returned HTTP 403 but recovered on its
-   * own (confirmed UP again) — that was a transient edge-IP abuse
-   * filter, not a permanent block, so it's back in as primary.
-   * CryptoCompare's free tier now requires an API key we don't have
-   * — removed. OANDA requires account verification unavailable in
-   * some regions — removed.
+   * PROVIDERS — FX only.
+   * Twelve Data primary, Dukascopy retired stub kept as a harmless
+   * no-op in case a future working endpoint appears.
    */
-
   const td = new TwelveDataProvider(env, cfg);
   const duk = new DukascopyProvider(env, cfg);
-  const bybit = new BybitProvider(cfg);
-  const kucoin = new KuCoinProvider(cfg);
-  const cg = new CoinGeckoProvider(env, cfg);
-
-  const providers = { td, duk, bybit, kucoin, cg };
+  const providers = { td, duk };
 
 
   /*
    * STEP 1 — REFRESH FX
-   * Assets are now prioritized by actual data health (gaps/staleness),
-   * not a blind round-robin, so broken pairs get healed first.
    */
   let fxRefresh = [];
   try {
-    fxRefresh = await refreshFX(env, cfg, assets, providers);
+    fxRefresh = await refreshFX(env, cfg, fxAssets, providers);
   } catch (e) {
     results.push({ status: "ERROR", stage: "FX_REFRESH", error: e.message });
   }
 
 
   /*
-   * STEP 2 — REFRESH CRYPTO
+   * STEP 2 — ANALYZE A ROTATING BATCH, SAVE EVERY SCORE
    */
-  let cryptoRefresh = [];
-  try {
-    cryptoRefresh = await refreshCrypto(env, cfg, assets, providers);
-  } catch (e) {
-    results.push({ status: "ERROR", stage: "CRYPTO_REFRESH", error: e.message });
-  }
-
-
-  /*
-   * STEP 3 — ANALYSIS (ROTATING BATCH, FX-WEIGHTED)
-   *
-   * FIX (Aug 2026): Cloudflare Workers' FREE plan gives only 10ms of
-   * CPU time per cron invocation. Running indicator math for all
-   * ~21 assets every tick blew past that, so analysis processes a
-   * small rotating slice per run instead.
-   *
-   * FIX (Aug 2026, part 2): the user trades FX pairs far more than
-   * crypto. A single shared cursor across all 21 assets gave crypto
-   * and FX equal analysis attention regardless of that. Analysis now
-   * uses two independent cursors — one for FX, one for crypto — and
-   * allocates more of the per-tick budget to FX (default 2:1 ratio),
-   * so FX pairs get analyzed more often without crypto ever being
-   * starved entirely.
-   */
-  const fxAssets = assets.filter(a => a.kind === "FX");
-  const cryptoAssets = assets.filter(a => a.kind === "CRYPTO");
-
-  const fxSlots = Math.max(1, Math.round(cfg.analysisPerRun * cfg.analysisFxRatio));
-  const cryptoSlots = Math.max(0, cfg.analysisPerRun - fxSlots);
-
-  const fxCursor = await getScanCursor(env.DB, "fx");
-  const cryptoCursor = await getScanCursor(env.DB, "crypto");
-
+  const cursor = await getScanCursor(env.DB, "fx");
+  const limit = Math.min(cfg.analysisPerRun, fxAssets.length);
   const batch = [];
-  if (fxAssets.length) {
-    for (let n = 0; n < Math.min(fxSlots, fxAssets.length); n++) {
-      batch.push(fxAssets[(fxCursor + n) % fxAssets.length]);
-    }
-    await setScanCursor(env.DB, (fxCursor + fxSlots) % fxAssets.length, "fx");
+  for (let n = 0; n < limit; n++) {
+    batch.push(fxAssets[(cursor + n) % fxAssets.length]);
   }
-  if (cryptoAssets.length && cryptoSlots > 0) {
-    for (let n = 0; n < Math.min(cryptoSlots, cryptoAssets.length); n++) {
-      batch.push(cryptoAssets[(cryptoCursor + n) % cryptoAssets.length]);
-    }
-    await setScanCursor(env.DB, (cryptoCursor + cryptoSlots) % cryptoAssets.length, "crypto");
-  }
+  await setScanCursor(env.DB, (cursor + limit) % fxAssets.length, "fx");
+
+  let scoredCount = 0;
 
   for (const asset of batch) {
     try {
@@ -296,20 +258,20 @@ async function runEngine(env) {
         continue;
       }
 
-      // External confirmation: a second, independent read on direction.
-      // FIX (Aug 2026): FX used to call fxref.price() (an extra
-      // subrequest) here on every analysis pass. With the subrequest
-      // budget already tight (~44/50 worst case), this is now a
-      // recent-momentum check for BOTH crypto and FX — same
-      // subrequest-free approach, no loss of real signal value since
-      // it was already a soft ✓/✕ adjustment, not a hard gate.
-      let external = null;
+      // External confirmation via recent-candle momentum — no extra
+      // subrequest needed.
       const latest = candles[candles.length - 1];
       const previous = candles[Math.max(0, candles.length - 4)];
       const move = latest.close - previous.close;
-      external = { source: latest.source || "recent_momentum", direction: move >= 0 ? "CALL" : "PUT" };
+      const external = { source: latest.source || "recent_momentum", direction: move >= 0 ? "CALL" : "PUT" };
 
       const analysis = analyze(asset.symbol, candles, dq.quality, external, cfg);
+      scoredCount++;
+
+      // Save EVERY result — eligible or not — so /scores can show
+      // the full picture and the best-of-window selector has fresh
+      // data to compare across the whole rotation.
+      await saveScore(env.DB, asset.symbol, analysis);
 
       if (!analysis.eligible) {
         results.push({
@@ -319,7 +281,10 @@ async function runEngine(env) {
         continue;
       }
 
-      candidates.push({ ...analysis, asset, feed: { candles: candles.length, quality: dq.quality, ageSeconds: dq.ageSeconds } });
+      results.push({
+        asset: asset.symbol, status: "SCORED_ELIGIBLE", direction: analysis.direction,
+        score: analysis.score, confidence: analysis.confidence
+      });
 
     } catch (e) {
       results.push({ asset: asset.symbol, status: "ERROR", error: e.message });
@@ -328,86 +293,101 @@ async function runEngine(env) {
 
 
   /*
-   * STEP 4 — RANK + AI REVIEW
-   */
-  candidates.sort((a, b) => b.score - a.score);
-
-  const selected = [];
-  const usedKeys = new Set();
-
-  for (const original of candidates) {
-    if (selected.length >= cfg.maxSignalsPerRun) break;
-
-    const key = `${original.asset.symbol}-${original.direction}`;
-    if (usedKeys.has(key)) continue;
-
-    const ai = await reviewCandidate(env, original);
-    const c = { ...original, ai };
-
-    if (ai.ok) {
-      if (ai.decision !== "APPROVE" || ai.direction !== original.direction) {
-        results.push({ asset: original.asset.symbol, status: "AI_REJECTED", reason: ai.reason, score: original.score });
-        continue;
-      }
-
-      c.score = Math.round(Math.min(100, Math.max(0, original.score + ai.adjustment)) * 10) / 10;
-      c.confidence = Math.max(original.confidence, ai.confidence);
-      c.reason = `${original.reason}. AI review: ${ai.reason}`;
-
-      if (c.score < cfg.minScore) continue;
-    }
-
-    selected.push(c);
-    usedKeys.add(key);
-  }
-
-
-  /*
-   * STEP 5 — TELEGRAM + LOG
+   * STEP 3 — BEST-OF-ROTATION-WINDOW SELECTION
+   *
+   * Look at the single highest-scoring ELIGIBLE asset across the
+   * last `bestOfWindowMs` (default: long enough to cover a full
+   * rotation through every FX pair at least once), not just this
+   * tick's batch. Only ONE signal is sent per invocation.
    */
   let sent = 0;
+  const best = await getBestRecentScore(env.DB, cfg.bestOfWindowMs);
 
-  for (const c of selected) {
-    const { entryMs, expiryMs } = entryAndExpiry(cfg.entryLeadMinutes, c.expiryMinutes);
-    const entryTime = formatWAT(entryMs);
-    const expiryTime = formatWAT(expiryMs);
-    const message = buildTelegram(c, entryTime, expiryTime);
+  if (best) {
+    // Re-fetch full candle context for the winning asset so the
+    // Telegram message and AI review have real snapshot data, not
+    // just the stored summary row.
+    const asset = fxAssets.find(a => a.symbol === best.symbol);
 
-    let telegramStatus = "Skipped (missing Telegram secrets)";
-
-    if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    if (asset) {
       try {
-        await sendTelegramMessage(env, message);
-        telegramStatus = "Sent Successfully";
-        sent++;
+        const state = await getMarketState(env.DB, asset, cfg);
+        const latest = state.candles[state.candles.length - 1];
+        const previous = state.candles[Math.max(0, state.candles.length - 4)];
+        const move = latest.close - previous.close;
+        const external = { source: latest.source || "recent_momentum", direction: move >= 0 ? "CALL" : "PUT" };
+        const freshAnalysis = analyze(asset.symbol, state.candles, state.quality.quality, external, cfg);
+
+        if (freshAnalysis.eligible) {
+          const ai = await reviewCandidate(env, { ...freshAnalysis, asset });
+
+          let finalCandidate = { ...freshAnalysis, asset, ai };
+          let shouldSend = true;
+
+          if (ai.ok) {
+            if (ai.decision !== "APPROVE" || ai.direction !== freshAnalysis.direction) {
+              shouldSend = false;
+              results.push({ asset: asset.symbol, status: "AI_REJECTED", reason: ai.reason, score: freshAnalysis.score });
+            } else {
+              finalCandidate.score = Math.round(Math.min(100, Math.max(0, freshAnalysis.score + ai.adjustment)) * 10) / 10;
+              finalCandidate.confidence = Math.max(freshAnalysis.confidence, ai.confidence);
+              finalCandidate.reason = `${freshAnalysis.reason}. AI review: ${ai.reason}`;
+              if (finalCandidate.score < cfg.minScore) shouldSend = false;
+            }
+          }
+
+          if (shouldSend) {
+            const { entryMs, expiryMs } = entryAndExpiry(cfg.entryLeadMinutes, finalCandidate.expiryMinutes);
+            const entryTime = formatWAT(entryMs);
+            const expiryTime = formatWAT(expiryMs);
+            const message = buildTelegram(finalCandidate, entryTime, expiryTime);
+
+            let telegramStatus = "Skipped (missing Telegram secrets)";
+            if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+              try {
+                await sendTelegramMessage(env, message);
+                telegramStatus = "Sent Successfully";
+                sent++;
+              } catch (e) {
+                telegramStatus = `Failed: ${e.message}`;
+              }
+            }
+
+            await env.DB.prepare(`
+              INSERT INTO signals
+              (symbol,signal,confidence,price,time_frame,entry_time,reasoning,score,expiry_minutes,data_source,data_quality,setup,external_confirmation,status)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            `).bind(
+              finalCandidate.asset.symbol, finalCandidate.direction, finalCandidate.confidence,
+              finalCandidate.snapshots.s1.close, "1M", entryTime, finalCandidate.reason,
+              finalCandidate.score, finalCandidate.expiryMinutes, "fusion", finalCandidate.dataQuality,
+              finalCandidate.setup, finalCandidate.externalConfirmation, "PENDING"
+            ).run();
+
+            results.push({
+              asset: finalCandidate.asset.symbol, status: "SIGNAL", direction: finalCandidate.direction,
+              score: finalCandidate.score, confidence: finalCandidate.confidence, entryTime, expiryTime, telegramStatus
+            });
+          }
+        } else {
+          // Market moved since it was scored — no longer eligible on
+          // a fresh re-check. Correctly skip rather than send stale.
+          results.push({ asset: asset.symbol, status: "STALE_ON_RECHECK", reason: freshAnalysis.reason });
+        }
       } catch (e) {
-        telegramStatus = `Failed: ${e.message}`;
+        results.push({ asset: asset.symbol, status: "ERROR", stage: "BEST_SELECTION", error: e.message });
       }
     }
-
-    await env.DB.prepare(`
-      INSERT INTO signals
-      (symbol,signal,confidence,price,time_frame,entry_time,reasoning,score,expiry_minutes,data_source,data_quality,setup,external_confirmation,status)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(
-      c.asset.symbol, c.direction, c.confidence, c.snapshots.s1.close, "1M", entryTime, c.reason,
-      c.score, c.expiryMinutes, "fusion", c.dataQuality, c.setup, c.externalConfirmation, "PENDING"
-    ).run();
-
-    results.push({
-      asset: c.asset.symbol, status: "SIGNAL", direction: c.direction, score: c.score,
-      confidence: c.confidence, entryTime, expiryTime, telegramStatus
-    });
   }
 
 
   return {
     status: "ok",
     durationMs: Date.now() - started,
-    assets: assets.length,
+    assets: fxAssets.length,
     refreshedFX: fxRefresh,
-    refreshedCrypto: cryptoRefresh,
-    candidates: candidates.length,
+    scored: scoredCount,
+    bestCandidate: best ? { symbol: best.symbol, score: best.score, scoredAt: new Date(best.scored_at).toISOString() } : null,
     sent,
     errors: results.filter(x => x.status === "ERROR").length,
     results
@@ -423,7 +403,7 @@ async function runEngine(env) {
 async function status(env) {
 
   const cfg = getConfig(env);
-  const assets = await getAssets(env.DB);
+  const assets = (await getAssets(env.DB)).filter(a => a.kind === "FX");
   const output = [];
 
   for (const asset of assets) {
@@ -455,7 +435,7 @@ async function status(env) {
     }
 
     output.push({
-      asset: asset.symbol, name: asset.display_name, kind: asset.kind, providerSymbol: asset.provider_symbol,
+      asset: asset.symbol, name: asset.display_name, providerSymbol: asset.provider_symbol,
       candles1m: clean.length, required1m: 300, candles5m: five, required5m: 30, candles15m: fifteen, required15m: 20,
       gaps, ageSeconds, latestCandleUTC: latest ? new Date(Number(latest.time) * 1000).toISOString() : null,
       latestSource: latest?.source || null, state
@@ -466,10 +446,50 @@ async function status(env) {
     status: "ok",
     config: {
       candleCount: cfg.candleCount, fxRefreshPerRun: cfg.fxRefreshPerRun, cacheMaxAgeSeconds: cfg.cacheMaxAgeSeconds,
-      providerRetries: cfg.providerRetries, minSignalScore: cfg.minScore, minDataQuality: cfg.minDataQuality
+      minSignalScore: cfg.minScore, minDataQuality: cfg.minDataQuality, analysisPerRun: cfg.analysisPerRun,
+      bestOfWindowMs: cfg.bestOfWindowMs
     },
     assets: output
   });
+}
+
+
+/* ============================================================
+   SCORES — diagnostic distribution across all FX assets
+============================================================ */
+
+async function scores(env) {
+  try {
+    const rows = await getAllRecentScores(env.DB);
+    const cfg = getConfig(env);
+
+    const enriched = rows.map(r => ({
+      symbol: r.symbol,
+      direction: r.direction,
+      score: r.score,
+      confidence: r.confidence,
+      dataQuality: r.data_quality,
+      agreement: r.agreement,
+      regime: r.regime,
+      eligible: !!r.eligible,
+      scoredAt: new Date(r.scored_at).toISOString(),
+      ageSeconds: Math.round((Date.now() - r.scored_at) / 1000),
+      distanceFromThreshold: r.score != null ? Math.round((r.score - cfg.minScore) * 10) / 10 : null
+    }));
+
+    const withScore = enriched.filter(r => r.score != null);
+    const avgScore = withScore.length ? Math.round((withScore.reduce((s, r) => s + r.score, 0) / withScore.length) * 10) / 10 : null;
+    const maxScore = withScore.length ? Math.max(...withScore.map(r => r.score)) : null;
+
+    return json({
+      status: "ok",
+      minSignalScore: cfg.minScore,
+      summary: { assetsScored: withScore.length, averageScore: avgScore, highestScore: maxScore },
+      scores: enriched
+    });
+  } catch (e) {
+    return json({ status: "error", error: e.message }, 500);
+  }
 }
 
 
@@ -484,12 +504,6 @@ async function health(env) {
       FROM provider_state ORDER BY provider
     `).all();
 
-    // FIX (Aug 2026): added Twelve Data quota visibility. Live
-    // symptom: refreshedFX showed "source":"cache","ok":false for
-    // top-priority pairs hours into a run, while /health still said
-    // twelvedata "UP" — the daily 800-request quota was the likely
-    // real cause, but there was no way to see remaining quota
-    // without querying D1 directly. Now surfaced directly here.
     const dayKey = new Date().toISOString().slice(0, 10);
     const minuteKey = new Date().toISOString().slice(0, 16);
     const dayRow = await env.DB.prepare(
