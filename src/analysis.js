@@ -283,3 +283,4 @@ export function analyze(symbol, candles1m, dataQuality, external = null, cfg = {
     regime: marketRegime
   };
 }
+
