@@ -17,4 +17,3 @@ export async function fetchJsonRetry(url,options={},timeoutMs=8500,retries=2){
 export function iso(tsMs=Date.now()){return new Date(tsMs).toISOString()}
 export function formatWAT(tsMs){return new Date(tsMs).toLocaleTimeString("en-US",{timeZone:"Africa/Lagos",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:true})}
 export function round(n,digits=5){const p=10**digits;return Math.round(n*p)/p}
-
