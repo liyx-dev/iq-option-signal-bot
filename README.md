@@ -1,80 +1,81 @@
-# LIYOG Blitz AI — MERGED SYSTEM (Aug 2026)
+# LIYOG Blitz AI — FX-ONLY, BEST-OF-ROTATION (Aug 2026)
 
-This is a COMPLETE package — every file your Worker needs. Replace
-your repo's `src/` folder with this one. Keep your existing
-`src/providers/coingecko.js` unchanged (not included here, no
-changes needed). Delete `src/providers/cryptocompare.js` and
-`src/providers/fxref.js` from your repo if present — neither is
-used anymore.
+## What changed
 
-## What this is
+**1. Crypto removed entirely.** No more Bybit/KuCoin/CoinGecko calls,
+no more crypto assets analyzed. All subrequest/CPU budget that used
+to be split across two asset classes now belongs to FX alone —
+subrequest budget is now ~30/50 per run (was ~44/50), giving real
+margin instead of the tight squeeze we kept hitting.
 
-You asked me to be honest about System 1 (Binance/CoinGecko,
-BTC-only) and System 2 (Twelve Data multi-asset) — both "worked" for
-you, but for different reasons:
+**2. Best-of-rotation-window signal selection — what you asked for.**
+Important nuance: analyzing all ~15 FX pairs in a single tick still
+isn't possible under the 10ms CPU cap (benchmarked: 3 assets alone
+hit 9.5-16ms). So instead: every tick analyzes a small rotating
+batch (2 assets) as before, but now SAVES every result — eligible or
+not — to a new `recent_scores` table. Each run then looks at every
+asset scored within the last `bestOfWindowMs` (default 12 minutes,
+roughly one full rotation cycle) and sends a signal ONLY for the
+single highest-scoring ELIGIBLE one. This is "loop through all, pick
+the strongest" — spread across a rotation window instead of one
+impossible instant, and only one signal is sent per run.
 
-- **System 1's "10 straight wins" is very likely variance, not
-  edge.** Its entire trading logic is one line: `direction =
-  change24h >= 0 ? "CALL" : "PUT"` — no RSI, no MACD, no
-  multi-timeframe check, a hardcoded 80% "confidence." A 24-hour
-  trend reading has weak predictive power for a 1-minute candle. I
-  did not build this logic into the production system — it would
-  look confident while carrying no real statistical edge.
+Before sending, the winning asset is re-analyzed fresh (not just
+using the stored score) — if market conditions moved and it's no
+longer eligible, the engine correctly skips rather than sending
+stale information.
 
-- **System 2's analysis WAS genuinely good** — real multi-timeframe
-  EMA/RSI/MACD/ADX/Bollinger scoring, comparable to what we already
-  built. Its failure was operational: no quota tracking, no candle
-  caching, refreshing every asset every tick with zero budget
-  awareness — which is what burned your Twelve Data quota fast.
+**3. New `/scores` diagnostic endpoint.** Shows every FX asset's most
+recent score, direction, confidence, and `distanceFromThreshold`
+(how far each score is from `MIN_SIGNAL_SCORE`). Fastest way to
+judge whether 76 is realistically achievable without guessing.
 
-## What's actually merged in this version
+## New database table — MUST run this migration first
+`add_recent_scores.sql` — creates the `recent_scores` table the new
+selection logic depends on. Run via Cloudflare Dashboard → D1 →
+trading_db → Console, BEFORE deploying the new code.
 
-1. **`indicators.js`** — existing EMA/RSI/ATR/MACD/ADX/Bollinger PLUS
-   System 2's support/resistance swing structure and candle body/wick
-   stats, ported in as additional signal.
+## Also run (optional but recommended)
+`disable_crypto.sql` — sets `enabled=0` on crypto assets rather than
+deleting them, so history is preserved and they can be re-enabled
+later for a separate crypto-focused Worker if you build one.
 
-2. **`analysis.js`** — existing scoring engine PLUS a new
-   support/resistance proximity penalty (avoid CALL right into
-   resistance, PUT right into support) and a small candle-body-
-   strength adjustment. Benchmarked: no meaningful CPU cost increase
-   (~1-3ms/asset, same as before).
+## Files to REPLACE
+All of `src/` except `providers/twelvedata.js` and
+`providers/coingecko.js` (both unchanged, keep your existing ones).
 
-3. **Crypto refreshes more aggressively now** (`cryptoRefreshPerRun`
-   raised from 2 to 4) since Bybit has no meaningful daily quota
-   ceiling, unlike Twelve Data's 800/day.
+## Files to DELETE from your repo
+- `src/providers/bybit.js`
+- `src/providers/kucoin.js`
+- `src/providers/cryptocompare.js`
+- `src/providers/fxref.js`
 
-4. **FX stays carefully quota-managed** (`fxRefreshPerRun` stays at
-   2, tiered priority allocator, atomic quota reservation).
+## Variables — what changed
+- `CRYPTO_REFRESH_PER_RUN` — no longer read, safe to remove
+- `ANALYSIS_FX_RATIO` — no longer read, safe to remove
+- `FX_REFRESH_PER_RUN` — now defaults to 3 (was 2)
+- `ANALYSIS_PER_RUN` — stays at 2 (kept conservative — see CPU note)
+- NEW: `BEST_OF_WINDOW_MINUTES` — rotation window to compare scores
+  over before picking the best. Defaults to 12. Optional.
 
-5. **Removed the `fxref.price()` external-confirmation call** for FX
-   to free subrequest budget — external confirmation now uses
-   recent-candle momentum for both crypto and FX (subrequest-free).
+## Honest note on analysisPerRun
+Benchmarked 3 assets/tick at median ~9.5ms, max ~16ms — too close to
+the 10ms cap given how much trouble this exact limit caused before.
+Kept at 2 for real margin. If logs stay clean for a while, we can
+consider raising it later.
 
-## Subrequest budget — hand-counted for this configuration
+## New endpoint: /scores
 ```
-cleanupStorage (most ticks): 0
-getAssets: 1
-refreshFX (2 assets): 11
-refreshCrypto (4 assets): 13
-analysis (2 assets, FX-weighted): 10
-AI review (up to 2-3 signals): 3
-Telegram + signal insert (up to 3): 6
-TOTAL: ~44, under the 50 cap
+GET /scores
 ```
+No auth required. Shows the full score distribution across all FX
+assets, with a summary (average score, highest score, count scored).
 
-## Why signals may still take some time even with this deploy
-This is real production-grade technical analysis with a genuinely
-selective scoring gate (`MIN_SIGNAL_SCORE=76`) — "no signal" beats a
-low-quality signal by design. Crypto pairs should generate
-analyzable data faster now thanks to the more aggressive refresh
-rate. But there's no way to promise a signal within a specific
-window without either loosening the scoring bar (a real quality
-tradeoff) or increasing compute budget — I won't pretend otherwise.
+## What to check after deploying
+1. Run both SQL migrations first.
+2. Deploy the code.
+3. Check Cloudflare Logs — confirm "outcome":"ok", no CPU/subrequest errors.
+4. Wait ~15-20 minutes (one full rotation), then check `/scores`.
+5. `/trigger?key=...` now shows `scored` count and `bestCandidate`
+   (whatever's currently winning the window, even if not yet sent).
 
-## Files in this package
-All of `src/` except `providers/coingecko.js` (keep your existing
-one, unchanged).
-
-## wrangler.toml
-Unchanged from your last working deploy — `*/2 * * * *` cron,
-observability enabled.
